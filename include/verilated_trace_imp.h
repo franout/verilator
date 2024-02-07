@@ -63,13 +63,13 @@ static double timescaleToDouble(const char* unitp) VL_PURE {
 static std::string doubleToTimescale(double value) VL_PURE {
     const char* suffixp = "s";
     // clang-format off
-    if      (value >= 1e0)   { suffixp = "s"; value *= 1e0; }
-    else if (value >= 1e-3 ) { suffixp = "ms"; value *= 1e3; }
-    else if (value >= 1e-6 ) { suffixp = "us"; value *= 1e6; }
-    else if (value >= 1e-9 ) { suffixp = "ns"; value *= 1e9; }
-    else if (value >= 1e-12) { suffixp = "ps"; value *= 1e12; }
-    else if (value >= 1e-15) { suffixp = "fs"; value *= 1e15; }
-    else if (value >= 1e-18) { suffixp = "as"; value *= 1e18; }
+    if      (value >= 1e0)   { suffixp = " s"; value *= 1e0; }
+    else if (value >= 1e-3 ) { suffixp = " ms"; value *= 1e3; }
+    else if (value >= 1e-6 ) { suffixp = " us"; value *= 1e6; }
+    else if (value >= 1e-9 ) { suffixp = " ns"; value *= 1e9; }
+    else if (value >= 1e-12) { suffixp = " ps"; value *= 1e12; }
+    else if (value >= 1e-15) { suffixp = " fs"; value *= 1e15; }
+    else if (value >= 1e-18) { suffixp = " as"; value *= 1e18; }
     // clang-format on
     char valuestr[100];
     VL_SNPRINTF(valuestr, 100, "%0.0f%s", value, suffixp);
