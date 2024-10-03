@@ -1,16 +1,16 @@
 # DESCRIPTION: Process this file with autoconf to produce a configure script.
 #
-# Copyright 2003-2023 by Wilson Snyder. Verilator is free software; you
+# Copyright 2003-2024 by Wilson Snyder. Verilator is free software; you
 # can redistribute it and/or modify it under the terms of either the GNU Lesser
 # General Public License Version 3 or the Perl Artistic License Version 2.0.
 # SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
-# When releasing, also update header of Changes file, and CmakeLists.txt,
+# When releasing, also update header of Changes file, and CMakeLists.txt,
 # and commit using "devel release" or "Version bump" message
 # Then 'make maintainer-dist'
 #AC_INIT([Verilator],[#.### YYYY-MM-DD])
 #AC_INIT([Verilator],[#.### devel])
-AC_INIT([Verilator],[5.018 2023-10-30],
+AC_INIT([Verilator],[5.029 devel],
         [https://verilator.org],
         [verilator],[https://verilator.org])
 
@@ -28,6 +28,9 @@ AC_DEFINE_UNQUOTED([PACKAGE_VERSION_STRING_CHAR],
         [static const char* const PACKAGE_STRING_UNUSED = "$PACKAGE_STRING";],
         [Package version as a number])
 AC_SUBST(PACKAGE_VERSION_STRING_CHAR)
+
+######################################################################
+## Arguments/flag checking
 
 # Ignore automake flags passed by Ubuntu builds
 AC_ARG_ENABLE([dependency-tracking],
@@ -66,20 +69,6 @@ AC_ARG_ENABLE([tcmalloc],
                esac],
               [CFG_WITH_TCMALLOC=check;])
 AC_MSG_RESULT($CFG_WITH_TCMALLOC)
-
-# Flag to enable -m32 build
-AC_MSG_CHECKING(whether to use -m32)
-AC_ARG_ENABLE([m32],
-              [AS_HELP_STRING([--enable-m32],
-                              [Use -m32 for all compilation and link,
-                               including Verilator and generated models.])],
-              [case "${enableval}" in
-                yes) CFG_ENABLE_M32=yes ;;
-                no)  CFG_ENABLE_M32=no ;;
-                *)   AC_MSG_ERROR([bad value '${enableval}' for --enable-m32]) ;;
-               esac],
-               CFG_ENABLE_M32=no)
-AC_MSG_RESULT($CFG_ENABLE_M32)
 
 # Flag to enable coverage build
 AC_MSG_CHECKING(whether to build for coverage collection)
@@ -148,6 +137,33 @@ AC_ARG_ENABLE([longtests],
 AC_SUBST(CFG_WITH_LONGTESTS)
 AC_MSG_RESULT($CFG_WITH_LONGTESTS)
 
+AC_CHECK_PROG(HAVE_Z3,z3,yes)
+AC_CHECK_PROG(HAVE_CVC5,cvc5,yes)
+AC_CHECK_PROG(HAVE_CVC4,cvc4,yes)
+
+# Special Substitutions - CFG_WITH_SOLVER
+AC_MSG_CHECKING(for SMT solver)
+AC_ARG_WITH([solver],
+              [AS_HELP_STRING([--with-solver='z3 --in'],
+                              [set default SMT solver for constrained randomization])],
+              [CFG_WITH_SOLVER="${withval}"],
+              [CFG_WITH_SOLVER=no
+               if test "x$HAVE_Z3" = "xyes"; then
+                CFG_WITH_SOLVER="z3 --in"
+               elif test "x$HAVE_CVC5" = "xyes"; then
+                CFG_WITH_SOLVER="cvc5 --incremental"
+               elif test "x$HAVE_CVC4" = "xyes"; then
+                CFG_WITH_SOLVER="cvc4 --lang=smt2 --incremental"
+               fi]
+              )
+AC_SUBST(CFG_WITH_SOLVER)
+AC_MSG_RESULT($CFG_WITH_SOLVER)
+
+######################################################################
+## Compiler checks
+
+AC_MSG_RESULT([compiler CXX inbound is set to... $CXX])
+
 # Compiler flags (ensure they are not empty to avoid configure defaults)
 CFLAGS="$CFLAGS "
 CPPFLAGS="$CPPFLAGS "
@@ -183,6 +199,8 @@ AC_PATH_PROG(PYTHON3,python3)
 if test "x$PYTHON3" = "x" ; then
    AC_MSG_ERROR([Cannot find "python3" in your PATH, please install it])
 fi
+python3_version=$($PYTHON3 --version | head -1)
+AC_MSG_RESULT([$PYTHON3 --version = $python3_version])
 
 AC_PATH_PROG(LEX,flex)
 if test "x$LEX" = "x" ; then
@@ -280,6 +298,43 @@ AC_DEFUN([_MY_CXX_CHECK_OPT],
     _MY_CXX_CHECK_IFELSE($2, $1="$$1 $2")
    ])
 
+AC_DEFUN([_MY_CXX_CHECK_CORO_SET],
+   [# _MY_CXX_CHECK_CORO_SET(variable,option)
+    # Check if compiler supports coroutines with specific option. If it does,
+    # set variable to option, only if not previously set.
+    # Define HAVE_COROUTINES if supported.
+    if test "$$1" = ""; then
+      if test "$2" != ""; then
+        _my_msg_opt=" with $2"
+      else
+        _my_msg_opt=""
+      fi
+      AC_MSG_CHECKING([whether coroutines are supported by $CXX$_my_msg_opt])
+      ACO_SAVE_CXXFLAGS="$CXXFLAGS"
+      CXXFLAGS="$CXXFLAGS $2"
+      AC_LINK_IFELSE(
+         [AC_LANG_PROGRAM([
+            #if defined(__clang__) && !defined(__cpp_impl_coroutine)
+            #define __cpp_impl_coroutine 1
+            #endif
+            #include <coroutine>
+          ],[[std::coroutine_handle<> h;]])],
+         [_my_result=yes],
+         [AC_LINK_IFELSE(
+             [AC_LANG_PROGRAM(
+                [#include <experimental/coroutine>],
+                [[std::experimental::coroutine_handle<> h;]])],
+             [_my_result=yes],
+             [_my_result=no])])
+      AC_MSG_RESULT($_my_result)
+      CXXFLAGS="$ACO_SAVE_CXXFLAGS"
+      if test "$_my_result" = "yes" ; then
+        $1="$2"
+        AC_DEFINE([HAVE_COROUTINES],[1],[Defined if coroutines are supported by $CXX])
+      fi
+    fi
+  ])
+
 AC_DEFUN([_MY_LDLIBS_CHECK_FLAG],
    [# _MY_LDLIBS_CHECK_FLAG(flag) -- Check if linker supports specific options
     # Set $_my_result appropriately
@@ -319,15 +374,7 @@ AC_DEFUN([_MY_LDLIBS_CHECK_OPT],
     _MY_LDLIBS_CHECK_IFELSE($2, $1="$$1 $2")
    ])
 
-# When using -m32. Check this first as later checks may fail with the -m32 flag.
-if test "$CFG_ENABLE_M32" = "yes"; then
-  _MY_CXX_CHECK_IFELSE(
-    -m32,
-    [CXX="$CXX -m32"],
-    [AC_MSG_ERROR([--enable-m32 was given but compiler does not support -m32])])
-fi
-
-# Similarly, add the coverage flags early as they influence later checks.
+# Add the coverage flags early as they influence later checks.
 if test "$CFG_ENABLE_COVERAGE" = "yes"; then
   _MY_CXX_CHECK_OPT(CXX,--coverage)
   # Otherwise inline may not show as uncovered
@@ -354,7 +401,7 @@ AC_SUBST(CFG_CXXFLAGS_PROFILE)
 # Macros work such that first option that passes is the one we take
 # Currently enable c++17/c++14 due to packaged SystemC dependency
 # c++17 is the newest that Verilator is regularly tested to support
-# c++11 is the oldest that Verilator supports
+# c++14 is the oldest that Verilator supports
 # gnu is required for Cygwin to compile verilated.h successfully
 #_MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=gnu++20)
 #_MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=c++20)
@@ -362,8 +409,6 @@ _MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=gnu++17)
 _MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=c++17)
 _MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=gnu++14)
 _MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=c++14)
-_MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=gnu++11)
-_MY_CXX_CHECK_SET(CFG_CXXFLAGS_STD_NEWEST,-std=c++11)
 AC_SUBST(CFG_CXXFLAGS_STD_NEWEST)
 
 # Flags for compiling Verilator internals including parser, and Verilated files
@@ -375,32 +420,12 @@ _MY_CXX_CHECK_OPT(CFG_CXXFLAGS_WEXTRA,-Wthread-safety)
 AC_SUBST(CFG_CXXFLAGS_WEXTRA)
 
 # Flags for coroutine support for dynamic scheduling
-_MY_CXX_CHECK_SET(CFG_CXXFLAGS_COROUTINES,-fcoroutines-ts)
-_MY_CXX_CHECK_SET(CFG_CXXFLAGS_COROUTINES,-fcoroutines)
-_MY_CXX_CHECK_SET(CFG_CXXFLAGS_COROUTINES,-fcoroutines-ts -Wno-deprecated-experimental-coroutine)
+_MY_CXX_CHECK_CORO_SET(CFG_CXXFLAGS_COROUTINES, "")
+_MY_CXX_CHECK_CORO_SET(CFG_CXXFLAGS_COROUTINES,-fcoroutines-ts)
+_MY_CXX_CHECK_CORO_SET(CFG_CXXFLAGS_COROUTINES,-fcoroutines)
+_MY_CXX_CHECK_CORO_SET(CFG_CXXFLAGS_COROUTINES,-fcoroutines-ts -Wno-deprecated-experimental-coroutine)
+_MY_CXX_CHECK_CORO_SET(CFG_CXXFLAGS_COROUTINES,-std=gnu++20)
 AC_SUBST(CFG_CXXFLAGS_COROUTINES)
-
-# HAVE_COROUTINES
-# Check if coroutines are supported at all
-AC_MSG_CHECKING([whether coroutines are supported by $CXX])
-ACO_SAVE_CXXFLAGS="$CXXFLAGS"
-CXXFLAGS="$CXXFLAGS $CFG_CXXFLAGS_COROUTINES"
-AC_LINK_IFELSE(
-    [AC_LANG_PROGRAM([
-#ifdef __clang__
-#define __cpp_impl_coroutine 1
-#endif
-#include <coroutine>
-    ],[[]])],
-    [_my_result=yes
-     AC_DEFINE([HAVE_COROUTINES],[1],[Defined if coroutines are supported by $CXX])],
-    [AC_LINK_IFELSE(
-        [AC_LANG_PROGRAM([#include <experimental/coroutine>],[[]])],
-        [_my_result=yes
-         AC_DEFINE([HAVE_COROUTINES],[1],[Defined if coroutines are supported by $CXX])],
-        [_my_result=no])])
-AC_MSG_RESULT($_my_result)
-CXXFLAGS="$ACO_SAVE_CXXFLAGS"
 AC_SUBST(HAVE_COROUTINES)
 
 # Flags for compiling Verilator internals including parser always
@@ -448,11 +473,11 @@ m4_foreach([cflag],[
         [-Wno-c++11-narrowing],
         [-Wno-constant-logical-operand],
         [-Wno-non-pod-varargs],
-        [-Wno-overloaded-virtual],
         [-Wno-parentheses-equality],
         [-Wno-shadow],
         [-Wno-sign-compare],
         [-Wno-tautological-bitwise-compare],
+        [-Wno-tautological-compare],
         [-Wno-uninitialized],
         [-Wno-unused-but-set-parameter],
         [-Wno-unused-but-set-variable],
@@ -499,6 +524,7 @@ AC_SUBST(CFG_LDFLAGS_VERILATED)
 # pthreads is harmless otherwise.
 CFG_LIBS="$LIBS $CFG_LIBS"
 _MY_LDLIBS_CHECK_OPT(CFG_LIBS, -lpthread)
+_MY_LDLIBS_CHECK_OPT(CFG_LIBS, -latomic)
 
 # Check libraries for MingW
 _MY_LDLIBS_CHECK_OPT(CFG_LIBS, -lbcrypt)
@@ -521,14 +547,14 @@ _MY_LDLIBS_CHECK_IFELSE(
    fi])
 AC_SUBST(CFG_LIBS)
 
-# Need C++11 at least
-#Alternative: AX_CXX_COMPILE_STDCXX([11])
+# Need C++14 at least
+#Alternative: AX_CXX_COMPILE_STDCXX([14])
 AC_DEFUN([_MY_CXX_CHECK_CXX_VER],
-   [# _MY_CXX_CHECK_CXX_VER(flag) -- Check if compiler runs C++11
+   [# _MY_CXX_CHECK_CXX_VER(flag) -- Check if compiler runs C++14
     # Set $_my_result
     AC_LINK_IFELSE(
      [AC_LANG_PROGRAM([#include <thread>
-#if (__cplusplus < 201103L)
+#if (__cplusplus < 201402L)
 # error "Too old"
 #endif
     ], [[ ]])],
@@ -544,13 +570,13 @@ AC_DEFUN([_MY_CXX_CHECK_CXX_VER],
 # Add $CFG_CXXFLAGS_STD only if can't compile correctly otherwise,
 # as adding std= when not needed can cause errors with the C++ std library.
 CFG_CXXFLAGS_STD=$CFG_CXXFLAGS_STD_NEWEST
-AC_MSG_CHECKING(whether $CXX supports C++11)
+AC_MSG_CHECKING(whether $CXX supports C++14)
 _MY_CXX_CHECK_CXX_VER()
 AC_MSG_RESULT($_my_result)
 if test "$_my_result" = "no" ; then
    CXXFLAGS="$CXXFLAGS $CFG_CXXFLAGS_STD"
    CFG_CXX_FLAGS_CMAKE="$CFG_CXX_FLAGS_CMAKE $CFG_CXXFLAGS_STD"
-   AC_MSG_CHECKING(whether $CXX supports C++11 with $CFG_CXXFLAGS_STD)
+   AC_MSG_CHECKING(whether $CXX supports C++14 with $CFG_CXXFLAGS_STD)
    _MY_CXX_CHECK_CXX_VER()
    AC_MSG_RESULT($_my_result)
 else
@@ -560,9 +586,9 @@ else
 fi
 if test "$_my_result" = "no" ; then
    AC_MSG_NOTICE([[]])
-   AC_MSG_ERROR([[the $CXX compiler appears to not support C++11.
+   AC_MSG_ERROR([[the $CXX compiler appears to not support C++14.
 
-Verilator requires a C++11 or newer compiler.]])
+Verilator requires a C++14 or newer compiler.]])
 
 fi
 AC_SUBST(CFG_CXXFLAGS_STD)
@@ -606,6 +632,9 @@ LIBS="$ACO_SAVE_LIBS"
 AC_SUBST(HAVE_SYSTEMC)
 
 # Checks for system services
+
+######################################################################
+## Output
 
 # Other install directories
 pkgdatadir=${datadir}/verilator

@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2001-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2001-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -120,11 +120,11 @@ void VerilatedVcd::open(const char* filename) VL_MT_SAFE_EXCLUDES(m_mutex) {
     printStr("\n$end\n");
 
     // Scope and signal definitions
-    assert(m_indent == 0);
+    assert(m_indent >= 0);
     ++m_indent;
     Super::traceInit();
     --m_indent;
-    assert(m_indent == 0);
+    assert(m_indent >= 0);
 
     printStr("$enddefinitions $end\n\n\n");
 
@@ -270,7 +270,7 @@ void VerilatedVcd::bufferFlush() VL_MT_UNSAFE_ONE {
     // We add output data to m_writep.
     // When it gets nearly full we dump it using this routine which calls write()
     // This is much faster than using buffered I/O
-    if (VL_UNLIKELY(!isOpen())) return;
+    if (VL_UNLIKELY(!m_isOpen)) return;
     const char* wp = m_wrBufp;
     while (true) {
         const ssize_t remaining = (m_writep - wp);
@@ -284,8 +284,7 @@ void VerilatedVcd::bufferFlush() VL_MT_UNSAFE_ONE {
             if (VL_UNCOVERABLE(errno != EAGAIN && errno != EINTR)) {
                 // LCOV_EXCL_START
                 // write failed, presume error (perhaps out of disk space)
-                const std::string msg
-                    = std::string{"VerilatedVcd::bufferFlush: "} + std::strerror(errno);
+                const std::string msg = "VerilatedVcd::bufferFlush: "s + std::strerror(errno);
                 VL_FATAL_MT("", 0, "", msg.c_str());
                 closeErr();
                 break;
@@ -303,13 +302,27 @@ void VerilatedVcd::bufferFlush() VL_MT_UNSAFE_ONE {
 
 void VerilatedVcd::printIndent(int level_change) {
     if (level_change < 0) m_indent += level_change;
-    for (int i = 0; i < m_indent; i++) printStr(" ");
+    for (int i = 0; i < m_indent; ++i) printStr(" ");
     if (level_change > 0) m_indent += level_change;
 }
 
 void VerilatedVcd::pushPrefix(const std::string& name, VerilatedTracePrefixType type) {
-    std::string newPrefix = m_prefixStack.back().first + name;
+    assert(!m_prefixStack.empty());  // Constructor makes an empty entry
+    std::string pname = name;
+    // An empty name means this is the root of a model created with name()=="".  The
+    // tools get upset if we try to pass this as empty, so we put the signals under a
+    // new scope, but the signals further down will be peers, not children (as usual
+    // for name()!="")
+    // Terminate earlier $root?
+    if (m_prefixStack.back().second == VerilatedTracePrefixType::ROOTIO_MODULE) popPrefix();
+    if (pname.empty()) {  // Start new temporary root
+        pname = "$rootio";  // VCD names are not backslash escaped
+        m_prefixStack.emplace_back("", VerilatedTracePrefixType::ROOTIO_WRAPPER);
+        type = VerilatedTracePrefixType::ROOTIO_MODULE;
+    }
+    std::string newPrefix = m_prefixStack.back().first + pname;
     switch (type) {
+    case VerilatedTracePrefixType::ROOTIO_MODULE:
     case VerilatedTracePrefixType::SCOPE_MODULE:
     case VerilatedTracePrefixType::SCOPE_INTERFACE:
     case VerilatedTracePrefixType::STRUCT_PACKED:
@@ -329,7 +342,9 @@ void VerilatedVcd::pushPrefix(const std::string& name, VerilatedTracePrefixType 
 }
 
 void VerilatedVcd::popPrefix() {
+    assert(!m_prefixStack.empty());
     switch (m_prefixStack.back().second) {
+    case VerilatedTracePrefixType::ROOTIO_MODULE:
     case VerilatedTracePrefixType::SCOPE_MODULE:
     case VerilatedTracePrefixType::SCOPE_INTERFACE:
     case VerilatedTracePrefixType::STRUCT_PACKED:
@@ -341,7 +356,7 @@ void VerilatedVcd::popPrefix() {
     default: break;
     }
     m_prefixStack.pop_back();
-    assert(!m_prefixStack.empty());
+    assert(!m_prefixStack.empty());  // Always one left, the constructor's initial one
 }
 
 void VerilatedVcd::declare(uint32_t code, const char* name, const char* wirep, bool array,
@@ -582,16 +597,11 @@ void VerilatedVcdBuffer::finishLine(uint32_t code, char* writep) {
 // so always inline them.
 
 VL_ATTR_ALWINLINE
-void VerilatedVcdBuffer::emitEvent(uint32_t code, const VlEventBase* newval) {
-    const bool triggered = newval->isTriggered();
-    // TODO : It seems that untriggered events are not filtered
-    // should be tested before this last step
-    if (triggered) {
-        // Don't prefetch suffix as it's a bit too late;
-        char* wp = m_writep;
-        *wp++ = '1';
-        finishLine(code, wp);
-    }
+void VerilatedVcdBuffer::emitEvent(uint32_t code) {
+    // Don't prefetch suffix as it's a bit too late;
+    char* wp = m_writep;
+    *wp++ = '1';
+    finishLine(code, wp);
 }
 
 VL_ATTR_ALWINLINE

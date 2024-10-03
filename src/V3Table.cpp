@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -79,7 +79,7 @@ public:
         : m_fl{fl} {}
 
     ~TableBuilder() {
-        if (m_initp) m_initp->deleteTree();
+        if (m_initp) VL_DO_DANGLING(m_initp->deleteTree(), m_initp);
     }
 
     void setTableSize(AstNodeDType* elemDType, unsigned size) {
@@ -89,16 +89,17 @@ public:
         // Create data type
         const int width = elemDType->width();
         AstNodeDType* const subDTypep
-            = elemDType->isString()
+            = elemDType->isString() || elemDType->isDouble()
                   ? elemDType
                   : v3Global.rootp()->findBitDType(width, width, VSigning::UNSIGNED);
         AstUnpackArrayDType* const tableDTypep = new AstUnpackArrayDType{
             m_fl, subDTypep, new AstRange{m_fl, static_cast<int>(size), 0}};
         v3Global.rootp()->typeTablep()->addTypesp(tableDTypep);
         // Create table initializer (with default value 0)
-        AstConst* const defaultp = elemDType->isString()
-                                       ? new AstConst{m_fl, AstConst::String{}, ""}
-                                       : new AstConst{m_fl, AstConst::WidthedValue{}, width, 0};
+        AstConst* const defaultp
+            = elemDType->isString()   ? new AstConst{m_fl, AstConst::String{}, ""}
+              : elemDType->isDouble() ? new AstConst{m_fl, AstConst::RealDouble{}, 0.0}
+                                      : new AstConst{m_fl, AstConst::WidthedValue{}, width, 0};
         m_initp = new AstInitArray{m_fl, tableDTypep, defaultp};
     }
 
@@ -110,7 +111,7 @@ public:
     }
 
     AstVarScope* varScopep() {
-        if (!m_varScopep) { m_varScopep = v3Global.rootp()->constPoolp()->findTable(m_initp); }
+        if (!m_varScopep) m_varScopep = v3Global.rootp()->constPoolp()->findTable(m_initp);
         return m_varScopep;
     }
 };
@@ -145,7 +146,6 @@ public:
 // Table class functions
 
 class TableVisitor final : public VNVisitor {
-private:
     // NODE STATE
     // Cleared on each always/assignw
 
@@ -209,6 +209,10 @@ private:
         // Instruction count bytes (ok, it's space also not time :)
         const double time  // max(_, 1), so we won't divide by zero
             = std::max<double>(chkvis.instrCount() * TABLE_BYTES_PER_INST + chkvis.dataCount(), 1);
+        if (chkvis.isImpure()) chkvis.clearOptimizable(nodep, "Table creates side effects");
+        if (!m_outWidthBytes || !m_inWidthBits) {
+            chkvis.clearOptimizable(nodep, "Table has no outputs");
+        }
         if (chkvis.instrCount() < TABLE_MIN_NODE_COUNT) {
             chkvis.clearOptimizable(nodep, "Table has too few nodes involved");
         }
@@ -220,12 +224,6 @@ private:
         }
         if (m_totalBytes > TABLE_TOTAL_BYTES) {
             chkvis.clearOptimizable(nodep, "Table out of memory");
-        }
-        if (!m_outWidthBytes || !m_inWidthBits) {
-            chkvis.clearOptimizable(nodep, "Table has no outputs");
-        }
-        if (chkvis.isOutputter()) {
-            chkvis.clearOptimizable(nodep, "Table creates display output");
         }
         UINFO(4, "  Test: Opt=" << (chkvis.optimizable() ? "OK" : "NO") << ", Instrs="
                                 << chkvis.instrCount() << " Data=" << chkvis.dataCount()
@@ -262,7 +260,7 @@ private:
             VL_MASK_I(m_inWidthBits));
 
         // Set sizes of output tables
-        for (TableOutputVar& tov : m_outVarps) { tov.setTableSize(VL_MASK_I(m_inWidthBits)); }
+        for (TableOutputVar& tov : m_outVarps) tov.setTableSize(VL_MASK_I(m_inWidthBits));
 
         // Populate the tables
         createTables(nodep, outputAssignedTableBuilder);
@@ -317,6 +315,7 @@ private:
             for (TableOutputVar& tov : m_outVarps) {
                 if (V3Number* const outnump = simvis.fetchOutNumberNull(tov.varScopep())) {
                     UINFO(8, "   Output " << tov.name() << " = " << *outnump << endl);
+                    UASSERT_OBJ(!outnump->isAnyXZ(), outnump, "Table should not contain X/Z");
                     outputAssignedMask.setBit(tov.ord(), 1);  // Mark output as assigned
                     tov.addValue(inValue, *outnump);
                 } else {
@@ -428,5 +427,5 @@ void TableSimulateVisitor::varRefCb(AstVarRef* nodep) {
 void V3Table::tableAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { TableVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("table", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("table", 0, dumpTreeEitherLevel() >= 3);
 }

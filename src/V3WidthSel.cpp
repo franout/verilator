@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -37,7 +37,6 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 // Width state, as a visitor of each AstNode
 
 class WidthSelVisitor final : public VNVisitor {
-private:
     // IMPORTANT
     //**** This is not a normal visitor, in that all iteration is instead
     //  done by the caller (V3Width).  This avoids duplicating much of the
@@ -58,7 +57,7 @@ private:
     }
 
     // RETURN TYPE
-    struct FromData {
+    struct FromData final {
         AstNodeDType* const m_errp;  // Node that was found, for error reporting if not known type
         AstNodeDType* const m_dtypep;  // Data type for the 'from' slice
         VNumRange m_fromRange;  // Numeric range bounds for the 'from' slice
@@ -168,6 +167,16 @@ private:
             }
         }
     }
+    AstNodeExpr* newMulConst(FileLine* fl, uint32_t elwidth, AstNodeExpr* indexp) {
+        AstNodeExpr* const extendp = new AstExtend{fl, indexp};
+        extendp->dtypeSetLogicUnsized(
+            32, std::max(V3Number::log2b(elwidth) + 1, indexp->widthMin()), VSigning::UNSIGNED);
+        AstNodeExpr* const mulp
+            = new AstMul{fl, new AstConst{fl, AstConst::Unsized32{}, elwidth},
+                         // Extend needed as index might be e.g. 3 bits but constant e.g. 5 bits
+                         extendp};
+        return mulp;
+    }
 
     AstNodeDType* sliceDType(AstPackArrayDType* nodep, int msb, int lsb) {
         // Return slice needed for msb/lsb, either as original dtype or a new slice dtype
@@ -206,6 +215,24 @@ private:
         }
     }
 
+    static bool isPossibleWrite(AstNodeExpr* nodep) {
+        AstNode* abovep = nodep->firstAbovep();
+        if (AstNodeAssign* const assignp = VN_CAST(abovep, NodeAssign)) {
+            // On an assign LHS, assume a write
+            return assignp->lhsp() == nodep;
+        }
+        if (AstMethodCall* const methodCallp = VN_CAST(abovep, MethodCall)) {
+            // A method call can write
+            return methodCallp->fromp() == nodep;
+        }
+        if (AstNodePreSel* const preSelp = VN_CAST(abovep, NodePreSel)) {
+            // If we're not selected from, it's not a write (we're the index)
+            if (preSelp->fromp() != nodep) return false;
+        }
+        AstNodeExpr* exprp = VN_CAST(abovep, NodeExpr);
+        return exprp ? isPossibleWrite(exprp) : false;
+    }
+
     // VISITORS
     // If adding new visitors, ensure V3Width's visit(TYPE) calls into here
 
@@ -216,7 +243,7 @@ private:
         if (debug() >= 9) nodep->backp()->dumpTree("-  SELBT0: ");
         // lhsp/rhsp do not need to be constant
         AstNodeExpr* const fromp = nodep->fromp()->unlinkFrBack();
-        AstNodeExpr* const rhsp = nodep->rhsp()->unlinkFrBack();  // bit we're extracting
+        AstNodeExpr* const rhsp = nodep->bitp()->unlinkFrBack();  // bit we're extracting
         if (debug() >= 9) nodep->dumpTree("-  SELBT2: ");
         const FromData fromdata = fromDataForArray(nodep, fromp);
         AstNodeDType* const ddtypep = fromdata.m_dtypep;
@@ -248,9 +275,7 @@ private:
             // cppcheck-suppress zerodivcond
             const int elwidth = adtypep->width() / fromRange.elements();
             AstSel* const newp = new AstSel{
-                nodep->fileline(), fromp,
-                new AstMul{nodep->fileline(),
-                           new AstConst(nodep->fileline(), AstConst::Unsized32{}, elwidth), subp},
+                nodep->fileline(), fromp, newMulConst(nodep->fileline(), elwidth, subp),
                 new AstConst(nodep->fileline(), AstConst::Unsized32{}, elwidth)};
             newp->declRange(fromRange);
             newp->declElWidth(elwidth);
@@ -275,7 +300,9 @@ private:
             VL_DO_DANGLING(pushDeletep(nodep), nodep);
         } else if (const AstDynArrayDType* const adtypep = VN_CAST(ddtypep, DynArrayDType)) {
             // SELBIT(array, index) -> CMETHODCALL(queue, "at", index)
-            AstCMethodHard* const newp = new AstCMethodHard{nodep->fileline(), fromp, "at", rhsp};
+            const char* methodName = isPossibleWrite(nodep) ? "atWrite" : "at";
+            AstCMethodHard* const newp
+                = new AstCMethodHard{nodep->fileline(), fromp, methodName, rhsp};
             newp->dtypeFrom(adtypep->subDTypep());  // Need to strip off queue reference
             if (debug() >= 9) newp->dumpTree("-  SELBTq: ");
             nodep->replaceWith(newp);
@@ -283,10 +310,12 @@ private:
         } else if (const AstQueueDType* const adtypep = VN_CAST(ddtypep, QueueDType)) {
             // SELBIT(array, index) -> CMETHODCALL(queue, "at", index)
             AstCMethodHard* newp;
+            const char* methodName = isPossibleWrite(nodep) ? "atWriteAppend" : "at";
             if (AstNodeExpr* const backnessp = selQueueBackness(rhsp)) {
-                newp = new AstCMethodHard{nodep->fileline(), fromp, "atBack", backnessp};
+                newp = new AstCMethodHard{nodep->fileline(), fromp,
+                                          std::string(methodName) + "Back", backnessp};
             } else {
-                newp = new AstCMethodHard{nodep->fileline(), fromp, "at", rhsp};
+                newp = new AstCMethodHard{nodep->fileline(), fromp, methodName, rhsp};
             }
             newp->dtypeFrom(adtypep->subDTypep());  // Need to strip off queue reference
             if (debug() >= 9) newp->dumpTree("-  SELBTq: ");
@@ -354,8 +383,8 @@ private:
         AstNodeDType* const ddtypep = fromdata.m_dtypep;
         const VNumRange fromRange = fromdata.m_fromRange;
         if (VN_IS(ddtypep, QueueDType)) {
-            AstNodeExpr* const qleftp = nodep->rhsp()->unlinkFrBack();
-            AstNodeExpr* const qrightp = nodep->thsp()->unlinkFrBack();
+            AstNodeExpr* const qleftp = nodep->leftp()->unlinkFrBack();
+            AstNodeExpr* const qrightp = nodep->rightp()->unlinkFrBack();
             AstNodeExpr* const qleftBacknessp = selQueueBackness(qleftp);
             AstNodeExpr* const qrightBacknessp = selQueueBackness(qrightp);
             // Use special methods to refer to back rather than math using
@@ -381,8 +410,8 @@ private:
                                "First value of [a:b] isn't a constant, maybe you want +: or -:");
         checkConstantOrReplace(nodep->rightp(),
                                "Second value of [a:b] isn't a constant, maybe you want +: or -:");
-        AstNodeExpr* const msbp = nodep->rhsp()->unlinkFrBack();
-        AstNodeExpr* const lsbp = nodep->thsp()->unlinkFrBack();
+        AstNodeExpr* const msbp = nodep->leftp()->unlinkFrBack();
+        AstNodeExpr* const lsbp = nodep->rightp()->unlinkFrBack();
         int32_t msb = VN_AS(msbp, Const)->toSInt();
         int32_t lsb = VN_AS(lsbp, Const)->toSInt();
         const int32_t elem = (msb > lsb) ? (msb - lsb + 1) : (lsb - msb + 1);
@@ -429,8 +458,7 @@ private:
             const int elwidth = adtypep->width() / fromRange.elements();
             AstSel* const newp = new AstSel{
                 nodep->fileline(), fromp,
-                new AstMul{nodep->fileline(), newSubLsbOf(lsbp, fromRange),
-                           new AstConst(nodep->fileline(), AstConst::Unsized32{}, elwidth)},
+                newMulConst(nodep->fileline(), elwidth, newSubLsbOf(lsbp, fromRange)),
                 new AstConst(nodep->fileline(), AstConst::Unsized32{}, (msb - lsb + 1) * elwidth)};
             newp->declRange(fromRange);
             newp->declElWidth(elwidth);
@@ -545,8 +573,10 @@ private:
                 // down array: msb/hi -: width
                 // up array:   msb/lo +: width
                 // up array:   lsb/hi -: width
-                const int32_t msb = VN_IS(nodep, SelPlus) ? rhs + width - 1 : rhs;
-                const int32_t lsb = VN_IS(nodep, SelPlus) ? rhs : rhs - width + 1;
+                const int32_t msb
+                    = (VN_IS(nodep, SelPlus) ? rhs + width - 1 : rhs) - fromRange.lo();
+                const int32_t lsb
+                    = (VN_IS(nodep, SelPlus) ? rhs : rhs - width + 1) - fromRange.lo();
                 AstSliceSel* const newp = new AstSliceSel{
                     nodep->fileline(), fromp, VNumRange{msb, lsb, fromRange.ascending()}};
                 nodep->replaceWith(newp);
@@ -584,10 +614,7 @@ private:
             } else {
                 nodep->v3fatalSrc("Bad Case");
             }
-            if (elwidth != 1) {
-                newlsbp = new AstMul{nodep->fileline(), newlsbp,
-                                     new AstConst(nodep->fileline(), elwidth)};
-            }
+            if (elwidth != 1) newlsbp = newMulConst(nodep->fileline(), elwidth, newlsbp);
             AstSel* const newp = new AstSel{nodep->fileline(), fromp, newlsbp, newwidthp};
             newp->declRange(fromRange);
             newp->declElWidth(elwidth);

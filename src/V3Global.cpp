@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2004-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2004-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -16,12 +16,19 @@
 
 #include "V3PchAstMT.h"
 
+#include "V3Global.h"
+
+#include "V3EmitV.h"
+#include "V3Error.h"
 #include "V3File.h"
 #include "V3HierBlock.h"
 #include "V3LinkCells.h"
 #include "V3Parse.h"
 #include "V3ParseSym.h"
 #include "V3Stats.h"
+#include "V3ThreadPool.h"
+
+VL_DEFINE_DEBUG_FUNCTIONS;
 
 //######################################################################
 // V3Global
@@ -33,6 +40,7 @@ void V3Global::boot() {
 
 void V3Global::shutdown() {
     VL_DO_CLEAR(delete m_hierPlanp, m_hierPlanp = nullptr);  // delete nullptr is safe
+    VL_DO_CLEAR(delete m_threadPoolp, m_threadPoolp = nullptr);  // delete nullptr is safe
 #ifdef VL_LEAK_CHECKS
     if (m_rootp) VL_DO_CLEAR(m_rootp->deleteTree(), m_rootp = nullptr);
 #endif
@@ -50,11 +58,18 @@ void V3Global::readFiles() {
 
     V3Parse parser{v3Global.rootp(), &filter, &parseSyms};
 
+    // Read .vlt files
+    const V3StringSet& vltFiles = v3Global.opt.vltFiles();
+    for (const string& filename : vltFiles) {
+        parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filename, false,
+                         "Cannot find file containing .vlt file: ");
+    }
+
     // Parse the std package
     if (v3Global.opt.std()) {
         parser.parseFile(new FileLine{V3Options::getStdPackagePath()},
                          V3Options::getStdPackagePath(), false,
-                         "Cannot find verilated_std.sv containing built-in std:: definitions:");
+                         "Cannot find verilated_std.sv containing built-in std:: definitions: ");
     }
 
     // Read top module
@@ -71,6 +86,13 @@ void V3Global::readFiles() {
     for (const string& filename : libraryFiles) {
         parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filename, true,
                          "Cannot find file containing library module: ");
+    }
+
+    // Read hierarchical type parameter file
+    const string filename = v3Global.opt.hierParamFile();
+    if (!filename.empty()) {
+        parser.parseFile(new FileLine{FileLine::commandLineFilename()}, filename, false,
+                         "Cannot open file containing hierarchical parameter declarations: ");
     }
 
     // v3Global.rootp()->dumpTreeFile(v3Global.debugFilename("parse.tree"));
@@ -106,11 +128,47 @@ string V3Global::digitsFilename(int number) {
 
 void V3Global::dumpCheckGlobalTree(const string& stagename, int newNumber, bool doDump) {
     const string treeFilename = v3Global.debugFilename(stagename + ".tree", newNumber);
-    v3Global.rootp()->dumpTreeFile(treeFilename, false, doDump);
+    if (dumpTreeLevel()) v3Global.rootp()->dumpTreeFile(treeFilename, doDump);
+    if (dumpTreeJsonLevel()) {
+        v3Global.rootp()->dumpTreeJsonFile(treeFilename + ".json", doDump);
+    }
     if (v3Global.opt.dumpTreeDot()) {
-        v3Global.rootp()->dumpTreeDotFile(treeFilename + ".dot", false, doDump);
+        v3Global.rootp()->dumpTreeDotFile(treeFilename + ".dot", doDump);
     }
     if (v3Global.opt.stats()) V3Stats::statsStage(stagename);
+
+    if (doDump && v3Global.opt.debugEmitV()) V3EmitV::debugEmitV(treeFilename + ".v");
+    if (v3Global.opt.debugCheck() || dumpTreeEitherLevel()) {
+        // Error check
+        v3Global.rootp()->checkTree();
+        // Broken isn't part of check tree because it can munge iterp's
+        // set by other steps if it is called in the middle of other operations
+        V3Broken::brokenAll(v3Global.rootp());
+    }
+}
+
+void V3Global::idPtrMapDumpJson(std::ostream& os) {
+    std::string sep = "\n  ";
+    os << "\"pointers\": {";
+    for (const auto& itr : m_ptrToId) {
+        os << sep << '"' << itr.second << "\": \"" << cvtToHex(itr.first) << '"';
+        sep = ",\n  ";
+    }
+    os << "\n }";
+}
+
+void V3Global::saveJsonPtrFieldName(const std::string& fieldName) {
+    m_jsonPtrNames.insert(fieldName);
+}
+
+void V3Global::ptrNamesDumpJson(std::ostream& os) {
+    std::string sep = "\n  ";
+    os << "\"ptrFieldNames\": [";
+    for (const auto& itr : m_jsonPtrNames) {
+        os << sep << '"' << itr << '"';
+        sep = ",\n  ";
+    }
+    os << "\n ]";
 }
 
 const std::string& V3Global::ptrToId(const void* p) {

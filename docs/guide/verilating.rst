@@ -1,4 +1,4 @@
-.. Copyright 2003-2023 by Wilson Snyder.
+.. Copyright 2003-2024 by Wilson Snyder.
 .. SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 **********
@@ -7,9 +7,13 @@ Verilating
 
 Verilator may be used in five major ways:
 
+* With the :vlopt:`--binary` option, Verilator will translate the design
+  into an executable, via generating C++ and compiling it.  See
+  :ref:`Binary, C++ and SystemC Generation`.
+
 * With the :vlopt:`--cc` or :vlopt:`--sc` options, Verilator will translate
-  the design into C++ or SystemC code, respectively.  See :ref:`C++ and
-  SystemC Generation`.
+  the design into C++ or SystemC code, respectively.  See :ref:`Binary, C++
+  and SystemC Generation`.
 
 * With the :vlopt:`--lint-only` option, Verilator will lint the design to
   check for warnings but will not typically create any output files.
@@ -24,13 +28,15 @@ Verilator may be used in five major ways:
   expanded.
 
 
-.. _C++ and SystemC Generation:
+.. _Binary, C++ and SystemC Generation:
 
-C++ and SystemC Generation
-==========================
+Binary, C++ and SystemC Generation
+==================================
 
 Verilator will translate a SystemVerilog design into C++ with the
-:vlopt:`--cc` option, or into SystemC with the :vlopt:`--sc` option.
+:vlopt:`--cc` option, or into SystemC with the :vlopt:`--sc` option.  It
+will translate into C++ and compile it into an executable binary with the
+:vlopt:`--binary` option.
 
 When using these options:
 
@@ -45,14 +51,19 @@ When using these options:
    The prefix is set with :vlopt:`--prefix`, or defaults to the name of the
    top module.
 
-#. If :vlopt:`--exe` is used, Verilator creates makefiles to generate a
-   simulation executable, otherwise, it creates makefiles to generate an
-   archive (.a) containing the objects.
+#. If :vlopt:`--binary` or :vlopt:`--main` is used, Verilator creates a C++
+   top wrapper to read command line arguments, create the model, and
+   execute the model.
 
-#. If :vlopt:`--build` option was used, it calls :ref:`GNU Make` or
-   :ref:`CMake` to build the model.
+#. If :vlopt:`--binary` or :vlopt:`--exe` is used, Verilator creates
+   makefiles to generate a simulation executable, otherwise, it creates
+   makefiles to generate an archive (.a) containing the objects.
 
-Once a model is built, it is then typically run, see :ref:`Simulating`.
+#. If :vlopt:`--binary` or :vlopt:`--build` is used, it calls :ref:`GNU
+   Make` or :ref:`CMake` to build the model.
+
+Once a model is built, the next step is typically for the user to run it,
+see :ref:`Simulating`.
 
 
 .. _Hierarchical Verilation:
@@ -293,9 +304,9 @@ GNU Make
 ========
 
 Verilator defaults to creating GNU Make makefiles for the model.  Verilator
-will call make automatically when the :vlopt:'--build' option is used.
+will call make automatically when the :vlopt:`--build` option is used.
 
-If calling Verilator from a makefile, the :vlopt:'-MMD' option will create
+If calling Verilator from a makefile, the :vlopt:`--MMD` option will create
 a dependency file, allowing Make to only run Verilator if input Verilog
 files change.
 
@@ -487,3 +498,78 @@ The search paths can be configured by setting some variables:
 
    Sets the installation prefix of an installed SystemC library. (Same as
    SYSTEMC_ROOT).
+
+
+.. _Verilation Summary Report:
+
+Verilation Summary Report
+=========================
+
+When Verilator generates code, unless :vlopt:`--quiet-stats` is used, it
+will print a report to stdout summarizing the build. For example:
+
+.. code-block::
+
+    - V e r i l a t i o n   R e p o r t: Verilator ....
+    - Verilator: Built from 354 MB sources in 247 modules,
+        into 74 MB in 89 C++ files needing 0.192 MB
+    - Verilator: Walltime 26.580 s (elab=2.096, cvt=18.268,
+        bld=2.100); cpu 26.548 s on 1 threads; alloced 2894.672 MB
+
+The information in this report is:
+
+.. describe:: "Verilator ..."
+
+   Program version.
+
+.. describe:: "234 MB sources"
+
+   Characters of post-preprocessed text in all input
+   Verilog and Verilator Control files in megabytes.
+
+.. describe:: "247 modules"
+
+   Number of interfaces/modules/classes/packages in design before
+   elaboration.
+
+.. describe:: "into 74 MB"
+
+   Characters of output C++ code, including comments in megabytes.
+
+.. describe:: "89 C++ files"
+
+   Number of .cpp files created.
+
+.. describe:: "needing 192MB"
+
+   Verilation-time minimum-bound estimate of memory needed to run model in
+   megabytes. (Expect to need significantly more.)
+
+.. describe:: "Walltime 26.580 s"
+
+   Real elapsed wall time for Verilation and build.
+
+.. describe:: "elab=2.096"
+
+   Wall time to read in files and complete elaboration.
+
+.. describe:: "cvt=18.268"
+
+   Wall time for Verilator to process and write output.
+
+.. describe:: "bld=2.1"
+
+   Wall time to compile gcc/clang (if using :vlopt:`--build`).
+
+.. describe:: "cpu 22.548 s"
+
+   CPU time used, total across all CPU threads.
+
+.. describe:: "4 threads"
+
+   Number of simultaneous threads used.
+
+.. describe:: "alloced 123 MB"
+
+   Total memory used during build by Verilator executable (excludes
+   :vlopt:`--build` compiler's usage) in megabytes.

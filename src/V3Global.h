@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -30,13 +30,15 @@
 #include "V3FileLine.h"
 #include "V3Mutex.h"
 #include "V3Options.h"
-#include "V3ThreadSafety.h"
 
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 class AstNetlist;
 class V3HierBlockPlan;
+class V3ThreadPool;
 
 //======================================================================
 // Restorer
@@ -74,16 +76,17 @@ public:
     VWidthMinUsage()
         : m_e{LINT_WIDTH} {}
     // cppcheck-suppress noExplicitConstructor
-    constexpr VWidthMinUsage(en _e)
-        : m_e{_e} {}
+    constexpr VWidthMinUsage(en _e) VL_PURE : m_e{_e} {}
+    constexpr VWidthMinUsage(const VWidthMinUsage& _e) VL_PURE = default;
     explicit VWidthMinUsage(int _e)
         : m_e(static_cast<en>(_e)) {}  // Need () or GCC 4.8 false warning
     constexpr operator en() const { return m_e; }
+    constexpr VWidthMinUsage& operator=(const VWidthMinUsage& _e) VL_PURE = default;
 };
 constexpr bool operator==(const VWidthMinUsage& lhs, const VWidthMinUsage& rhs) {
     return lhs.m_e == rhs.m_e;
 }
-constexpr bool operator==(const VWidthMinUsage& lhs, VWidthMinUsage::en rhs) {
+constexpr bool operator==(const VWidthMinUsage& lhs, VWidthMinUsage::en rhs) VL_PURE {
     return lhs.m_e == rhs;
 }
 constexpr bool operator==(VWidthMinUsage::en lhs, const VWidthMinUsage& rhs) {
@@ -99,6 +102,8 @@ class V3Global final {
     // created by makeInitNetlist(} so static constructors run first
     V3HierBlockPlan* m_hierPlanp = nullptr;  // Hierarchical Verilation plan,
     // nullptr unless hier_block, set via hierPlanp(V3HierBlockPlan*}
+    V3ThreadPool* m_threadPoolp = nullptr;  // Thread Pool,
+    // nullptr unless 'verilatedJobs' is known, set via threadPoolp(V3ThreadPool*)
     VWidthMinUsage m_widthMinUsage
         = VWidthMinUsage::LINT_WIDTH;  // What AstNode::widthMin() is used for
 
@@ -112,6 +117,8 @@ class V3Global final {
     bool m_dpi = false;  // Need __Dpi include files
     bool m_hasEvents = false;  // Design uses SystemVerilog named events
     bool m_hasClasses = false;  // Design uses SystemVerilog classes
+    bool m_hasSampled = false;  // Design uses SAMPLED expresions
+    bool m_hasVirtIfaces = false;  // Design uses virtual interfaces
     bool m_usesProbDist = false;  // Uses $dist_*
     bool m_usesStdPackage = false;  // Design uses the std package
     bool m_usesTiming = false;  // Design uses timing constructs
@@ -124,6 +131,12 @@ class V3Global final {
     std::unordered_map<const void*, std::string>
         m_ptrToId;  // The actual 'address' <=> 'short string' bijection
 
+    // Names of fields that were dumped by dumpJsonPtr()
+    std::unordered_set<std::string> m_jsonPtrNames;
+
+    // Id of the main thread
+    const std::thread::id m_mainThreadId = std::this_thread::get_id();
+
 public:
     // Options
     V3Options opt;  // All options; let user see them directly
@@ -135,7 +148,12 @@ public:
 
     // ACCESSORS (general)
     AstNetlist* rootp() const VL_MT_SAFE { return m_rootp; }
-    VWidthMinUsage widthMinUsage() const { return m_widthMinUsage; }
+    V3ThreadPool* threadPoolp() const VL_PURE { return m_threadPoolp; }
+    void threadPoolp(V3ThreadPool* threadPoolp) {
+        UASSERT(!m_threadPoolp, "attempted to create multiple threadPool singletons");
+        m_threadPoolp = threadPoolp;
+    }
+    VWidthMinUsage widthMinUsage() const VL_PURE { return m_widthMinUsage; }
     bool assertDTypesResolved() const { return m_assertDTypesResolved; }
     bool assertScoped() const { return m_assertScoped; }
 
@@ -162,6 +180,10 @@ public:
     void setHasEvents() { m_hasEvents = true; }
     bool hasClasses() const { return m_hasClasses; }
     void setHasClasses() { m_hasClasses = true; }
+    bool hasSampled() const { return m_hasSampled; }
+    void setHasSampled() { m_hasSampled = true; }
+    bool hasVirtIfaces() const { return m_hasVirtIfaces; }
+    void setHasVirtIfaces() { m_hasVirtIfaces = true; }
     bool usesProbDist() const { return m_usesProbDist; }
     void setUsesProbDist() { m_usesProbDist = true; }
     bool usesStdPackage() const { return m_usesStdPackage; }
@@ -177,11 +199,15 @@ public:
         UASSERT(!m_hierPlanp, "call once");
         m_hierPlanp = plan;
     }
-    void useParallelBuild(bool flag) { m_useParallelBuild = flag; }
     bool useParallelBuild() const { return m_useParallelBuild; }
-    void useRandomizeMethods(bool flag) { m_useRandomizeMethods = flag; }
+    void useParallelBuild(bool flag) { m_useParallelBuild = flag; }
     bool useRandomizeMethods() const { return m_useRandomizeMethods; }
+    void useRandomizeMethods(bool flag) { m_useRandomizeMethods = flag; }
+    void saveJsonPtrFieldName(const std::string& fieldName);
+    void ptrNamesDumpJson(std::ostream& os);
+    void idPtrMapDumpJson(std::ostream& os);
     const std::string& ptrToId(const void* p);
+    std::thread::id mainThreadId() const { return m_mainThreadId; }
 };
 
 extern V3Global v3Global;

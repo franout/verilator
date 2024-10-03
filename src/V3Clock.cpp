@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -31,7 +31,7 @@
 
 #include "V3Clock.h"
 
-#include "V3Sched.h"
+#include "V3Const.h"
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
@@ -39,7 +39,6 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 // Convert every WRITE AstVarRef to a READ ref
 
 class ConvertWriteRefsToRead final : public VNVisitor {
-private:
     // MEMBERS
     AstNodeExpr* m_result = nullptr;
 
@@ -54,6 +53,7 @@ private:
         if (nodep->access().isWriteOnly()) {
             nodep->replaceWith(
                 new AstVarRef{nodep->fileline(), nodep->varScopep(), VAccess::READ});
+            VL_DO_DANGLING(pushDeletep(nodep), nodep);
         }
     }
 
@@ -67,13 +67,11 @@ public:
 // Clock state, as a visitor of each AstNode
 
 class ClockVisitor final : public VNVisitor {
-private:
+    // NODE STATE
     // STATE
     AstCFunc* m_evalp = nullptr;  // The '_eval' function
-    AstScope* m_scopep = nullptr;  // Current scope
     AstSenTree* m_lastSenp = nullptr;  // Last sensitivity match, so we can detect duplicates.
     AstIf* m_lastIfp = nullptr;  // Last sensitivity if active to add more under
-    bool m_inSampled = false;  // True inside a sampled expression
 
     // METHODS
 
@@ -85,25 +83,6 @@ private:
             senEqnp = senEqnp ? new AstOr{senp->fileline(), senEqnp, senOnep} : senOnep;
         }
         return senEqnp;
-    }
-    AstVarScope* createSampledVar(AstVarScope* vscp) {
-        if (vscp->user1p()) return VN_AS(vscp->user1p(), VarScope);
-        const AstVar* const varp = vscp->varp();
-        const string newvarname
-            = string{"__Vsampled__"} + vscp->scopep()->nameDotless() + "__" + varp->name();
-        FileLine* const flp = vscp->fileline();
-        AstVar* const newvarp = new AstVar{flp, VVarType::MODULETEMP, newvarname, varp->dtypep()};
-        newvarp->noReset(true);  // Reset by below assign
-        m_scopep->modp()->addStmtsp(newvarp);
-        AstVarScope* const newvscp = new AstVarScope{flp, m_scopep, newvarp};
-        vscp->user1p(newvscp);
-        m_scopep->addVarsp(newvscp);
-        // At the top of _eval, assign them
-        AstAssign* const finalp = new AstAssign{flp, new AstVarRef{flp, newvscp, VAccess::WRITE},
-                                                new AstVarRef{flp, vscp, VAccess::READ}};
-        m_evalp->addInitsp(finalp);
-        UINFO(4, "New Sampled: " << newvscp << endl);
-        return newvscp;
     }
     AstIf* makeActiveIf(AstSenTree* sensesp) {
         AstNodeExpr* const senEqnp = createSenseEquation(sensesp->sensesp());
@@ -124,8 +103,15 @@ private:
         AstNodeExpr* const origp = nodep->origp()->unlinkFrBack();
         AstNodeExpr* const changeWrp = nodep->changep()->unlinkFrBack();
         AstNodeExpr* const changeRdp = ConvertWriteRefsToRead::main(changeWrp->cloneTree(false));
-        AstIf* const newp
-            = new AstIf{nodep->fileline(), new AstXor{nodep->fileline(), origp, changeRdp}, incp};
+        AstNodeExpr* comparedp = nullptr;
+        // Xor will optimize better than Eq, when CoverToggle has bit selects,
+        // but can only use Xor with non-opaque types
+        if (const AstBasicDType* const bdtypep
+            = VN_CAST(origp->dtypep()->skipRefp(), BasicDType)) {
+            if (!bdtypep->isOpaque()) comparedp = new AstXor{nodep->fileline(), origp, changeRdp};
+        }
+        if (!comparedp) comparedp = AstEq::newTyped(nodep->fileline(), origp, changeRdp);
+        AstIf* const newp = new AstIf{nodep->fileline(), comparedp, incp};
         // We could add another IF to detect posedges, and only increment if so.
         // It's another whole branch though versus a potential memory miss.
         // We'll go with the miss.
@@ -171,33 +157,15 @@ private:
         clearLastSen();
     }
 
-    //========== Create sampled values
-    void visit(AstScope* nodep) override {
-        VL_RESTORER(m_scopep);
-        {
-            m_scopep = nodep;
-            iterateChildren(nodep);
-        }
-    }
-    void visit(AstSampled* nodep) override {
-        VL_RESTORER(m_inSampled);
-        {
-            m_inSampled = true;
-            iterateChildren(nodep);
-            nodep->replaceWith(nodep->exprp()->unlinkFrBack());
-            VL_DO_DANGLING(pushDeletep(nodep), nodep);
-        }
-    }
-    void visit(AstVarRef* nodep) override {
-        iterateChildren(nodep);
-        if (m_inSampled && !nodep->user1SetOnce()) {
-            UASSERT_OBJ(nodep->access().isReadOnly(), nodep, "Should have failed in V3Access");
-            AstVarScope* const varscp = nodep->varScopep();
-            AstVarScope* const lastscp = createSampledVar(varscp);
-            AstNode* const newp = new AstVarRef{nodep->fileline(), lastscp, VAccess::READ};
-            newp->user1SetOnce();  // Don't sample this one
-            nodep->replaceWith(newp);
-            VL_DO_DANGLING(pushDeletep(nodep), nodep);
+    //========== Move sampled assignments
+    void visit(AstVarScope* nodep) override {
+        AstVar* varp = nodep->varp();
+        if (varp->valuep() && varp->name().substr(0, strlen("__Vsampled")) == "__Vsampled") {
+            m_evalp->addInitsp(new AstAssign{
+                nodep->fileline(), new AstVarRef{nodep->fileline(), nodep, VAccess::WRITE},
+                VN_AS(varp->valuep()->unlinkFrBack(), NodeExpr)});
+            varp->direction(VDirection::NONE);  // Restore defaults
+            varp->primaryIO(false);
         }
     }
 
@@ -208,6 +176,11 @@ public:
     // CONSTRUCTORS
     explicit ClockVisitor(AstNetlist* netlistp) {
         m_evalp = netlistp->evalp();
+        // Simplify all SenTrees
+        for (AstSenTree* senTreep = netlistp->topScopep()->senTreesp(); senTreep;
+             senTreep = VN_AS(senTreep->nextp(), SenTree)) {
+            V3Const::constifyExpensiveEdit(senTreep);
+        }
         iterate(netlistp);
     }
     ~ClockVisitor() override = default;
@@ -219,5 +192,5 @@ public:
 void V3Clock::clockAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { ClockVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("clock", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("clock", 0, dumpTreeEitherLevel() >= 3);
 }

@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -53,11 +53,12 @@ class EmitCModel final : public EmitCFunc {
     }
 
     void emitHeader(AstNodeModule* modp) {
-        UASSERT(!m_ofp, "Output file should not be open");
+        UASSERT(!ofp(), "Output file should not be open");
 
         const string filename = v3Global.opt.makeDir() + "/" + topClassName() + ".h";
-        newCFile(filename, /* slow: */ false, /* source: */ false);
-        m_ofp = v3Global.opt.systemC() ? new V3OutScFile{filename} : new V3OutCFile{filename};
+        setOutputFile(v3Global.opt.systemC() ? new V3OutScFile{filename}
+                                             : new V3OutCFile{filename},
+                      newCFile(filename, /* slow: */ false, /* source: */ false));
 
         ofp()->putsHeader();
         puts("// DESCRIPTION: Verilator output: Primary model header\n");
@@ -87,7 +88,7 @@ class EmitCModel final : public EmitCFunc {
         puts("\n");
 
         puts("// This class is the main interface to the Verilated model\n");
-        puts("class alignas(VL_CACHE_LINE_BYTES) " + topClassName() + " VL_NOT_FINAL : ");
+        putns(modp, "class alignas(VL_CACHE_LINE_BYTES) " + topClassName() + " VL_NOT_FINAL : ");
         if (optSystemC()) {
             // SC_MODULE, but with multiple-inheritance of VerilatedModel
             puts("public ::sc_core::sc_module, ");
@@ -101,6 +102,12 @@ class EmitCModel final : public EmitCFunc {
 
         puts("\n");
         ofp()->putsPrivate(false);  // public:
+
+        puts("\n// CONSTEXPR CAPABILITIES\n");
+        puts("// Verilated with --trace?\n");
+        puts("static constexpr bool traceCapable = "s
+             + (v3Global.opt.trace() ? "true;\n"s : "false;\n"s));
+
         // User accessible IO
         puts("\n// PORTS\n"
              "// The application code writes and reads these signals to\n"
@@ -112,6 +119,17 @@ class EmitCModel final : public EmitCFunc {
                 }
             }
         }
+        if (v3Global.opt.emitAccessors()) {
+            puts("\n// ACCESSORS\n"
+                 "// The application code should use these methods to\n"
+                 "// propagate new values into/out from the Verilated model\n"
+                 "// instead of using signal variables directly.\n");
+            for (const AstNode* nodep = modp->stmtsp(); nodep; nodep = nodep->nextp()) {
+                if (const AstVar* const varp = VN_CAST(nodep, Var)) {
+                    if (varp->isPrimaryIO()) emitVarAccessors(varp);
+                }
+            }
+        }
         if (optSystemC() && v3Global.usesTiming()) puts("sc_core::sc_event trigger_eval;\n");
 
         // Cells instantiated by the top level (for access to /* verilator public */)
@@ -120,7 +138,8 @@ class EmitCModel final : public EmitCFunc {
              "// Otherwise the application code can consider these internals.\n");
         for (AstNode* nodep = modp->stmtsp(); nodep; nodep = nodep->nextp()) {
             if (const AstCell* const cellp = VN_CAST(nodep, Cell)) {
-                puts(prefixNameProtect(cellp->modp()) + "* const " + cellp->nameProtect() + ";\n");
+                putns(cellp, prefixNameProtect(cellp->modp()) + "* const " + cellp->nameProtect()
+                                 + ";\n");
             }
         }
 
@@ -195,8 +214,9 @@ class EmitCModel final : public EmitCFunc {
 
         if (v3Global.opt.trace() || !optSystemC()) {
             puts("/// Trace signals in the model; called by application code\n");
-            puts("void trace(" + v3Global.opt.traceClassBase()
-                 + "C* tfp, int levels, int options = 0);\n");
+            // Backward-compatible usage of calling trace() on the model - now part of context
+            puts("void trace(VerilatedTraceBaseC* tfp, int levels, int options = 0) {"
+                 " contextp()->trace(tfp, levels, options); }\n");
         }
         if (v3Global.opt.trace() && optSystemC()) {
             puts("/// SC tracing; avoid overloaded virtual function lint warning\n");
@@ -242,18 +262,22 @@ class EmitCModel final : public EmitCFunc {
             puts("std::unique_ptr<VerilatedTraceConfig> traceConfig() const override final;\n");
         }
 
+        ofp()->putsPrivate(true);  // private:
+        puts("// Internal functions - trace registration\n");
+        puts("void traceBaseModel(VerilatedTraceBaseC* tfp, int levels, int options);\n");
+
         puts("};\n");
 
         ofp()->putsEndGuard();
 
-        VL_DO_CLEAR(delete m_ofp, m_ofp = nullptr);
+        closeOutputFile();
     }
 
     void emitConstructorImplementation(AstNodeModule* modp) {
         putSectionDelimiter("Constructors");
 
         puts("\n");
-        puts(topClassName() + "::" + topClassName());
+        putns(modp, topClassName() + "::" + topClassName());
         if (optSystemC()) {
             puts("(sc_core::sc_module_name /* unused */)\n");
             puts("    : VerilatedModel{*Verilated::threadContextp()}\n");
@@ -269,7 +293,8 @@ class EmitCModel final : public EmitCFunc {
             if (const AstVar* const varp = VN_CAST(nodep, Var)) {
                 if (varp->isPrimaryIO()) {
                     const string protName = varp->nameProtect();
-                    puts("    , " + protName + "{vlSymsp->TOP." + protName + "}\n");
+                    puts("    , ");
+                    putns(varp, protName + "{vlSymsp->TOP." + protName + "}\n");
                 }
             }
         }
@@ -278,7 +303,8 @@ class EmitCModel final : public EmitCFunc {
         for (AstNode* nodep = modp->stmtsp(); nodep; nodep = nodep->nextp()) {
             if (const AstCell* const cellp = VN_CAST(nodep, Cell)) {
                 const string protName = cellp->nameProtect();
-                puts("    , " + protName + "{vlSymsp->TOP." + protName + "}\n");
+                puts("    , ");
+                putns(cellp, protName + "{vlSymsp->TOP." + protName + "}\n");
             }
         }
 
@@ -288,10 +314,14 @@ class EmitCModel final : public EmitCFunc {
         puts("{\n");
         puts("// Register model with the context\n");
         puts("contextp()->addModel(this);\n");
+        if (v3Global.opt.trace())
+            puts("contextp()->traceBaseModelCbAdd(\n"
+                 "[this](VerilatedTraceBaseC* tfp, int levels, int options) {"
+                 " traceBaseModel(tfp, levels, options); });\n");
 
         if (optSystemC()) {
             // Create sensitivity list for when to evaluate the model.
-            putsDecoration("// Sensitivities on all clocks and combinational inputs\n");
+            putsDecoration(nullptr, "// Sensitivities on all clocks and combinational inputs\n");
             puts("SC_METHOD(eval);\n");
             if (v3Global.usesTiming()) puts("SC_METHOD(eval_sens);\n");
             for (AstNode* nodep = modp->stmtsp(); nodep; nodep = nodep->nextp()) {
@@ -306,13 +336,13 @@ class EmitCModel final : public EmitCFunc {
                             const int vecnum = vects++;
                             UASSERT_OBJ(arrayp->hi() >= arrayp->lo(), varp,
                                         "Should have swapped msb & lsb earlier.");
-                            const string ivar = std::string{"__Vi"} + cvtToStr(vecnum);
-                            puts("for (int __Vi" + cvtToStr(vecnum) + " = "
-                                 + cvtToStr(arrayp->lo()));
+                            const string ivar = "__Vi"s + cvtToStr(vecnum);
+                            putns(varp, "for (int __Vi" + cvtToStr(vecnum) + " = "
+                                            + cvtToStr(arrayp->lo()));
                             puts("; " + ivar + " <= " + cvtToStr(arrayp->hi()));
                             puts("; ++" + ivar + ") {\n");
                         }
-                        puts("sensitive << " + varp->nameProtect());
+                        putns(varp, "sensitive << " + varp->nameProtect());
                         for (int v = 0; v < vects; ++v) puts("[__Vi" + cvtToStr(v) + "]");
                         puts(";\n");
                         for (int v = 0; v < vects; ++v) puts("}\n");
@@ -384,7 +414,7 @@ class EmitCModel final : public EmitCFunc {
              + "::eval_step\\n\"); );\n");
 
         puts("#ifdef VL_DEBUG\n");
-        putsDecoration("// Debug assertions\n");
+        putsDecoration(nullptr, "// Debug assertions\n");
         puts(topModNameProtected + "__" + protect("_eval_debug_assertions")
              + "(&(vlSymsp->TOP));\n");
         puts("#endif  // VL_DEBUG\n");
@@ -407,7 +437,7 @@ class EmitCModel final : public EmitCFunc {
         puts("VL_DEBUG_IF(VL_DBG_MSGF(\"+ Eval\\n\"););\n");
         puts(topModNameProtected + "__" + protect("_eval") + "(&(vlSymsp->TOP));\n");
 
-        putsDecoration("// Evaluate cleanup\n");
+        putsDecoration(nullptr, "// Evaluate cleanup\n");
         puts("Verilated::endOfEval(vlSymsp->__Vm_evalMsgQp);\n");
 
         puts("}\n");
@@ -419,11 +449,12 @@ class EmitCModel final : public EmitCFunc {
 
         // ::eval_end_step
         if (v3Global.needTraceDumper() && !optSystemC()) {
-            puts("\nvoid " + topClassName() + "::eval_end_step() {\n");
+            puts("\n");
+            putns(modp, "void " + topClassName() + "::eval_end_step() {\n");
             puts("VL_DEBUG_IF(VL_DBG_MSGF(\"+eval_end_step " + topClassName()
                  + "::eval_end_step\\n\"); );\n");
             puts("#ifdef VM_TRACE\n");
-            putsDecoration("// Tracing\n");
+            putsDecoration(nullptr, "// Tracing\n");
             // SystemC's eval loop deals with calling trace, not us
             puts("if (VL_UNLIKELY(vlSymsp->__Vm_dumping)) vlSymsp->_traceDump();\n");
             puts("#endif  // VM_TRACE\n");
@@ -432,14 +463,15 @@ class EmitCModel final : public EmitCFunc {
 
         putSectionDelimiter("Events and timing");
         if (auto* const delaySchedp = v3Global.rootp()->delaySchedulerp()) {
-            puts("bool " + topClassName() + "::eventsPending() { return !vlSymsp->TOP.");
+            putns(modp, "bool " + topClassName() + "::eventsPending() { return !vlSymsp->TOP.");
             puts(delaySchedp->nameProtect());
             puts(".empty(); }\n\n");
-            puts("uint64_t " + topClassName() + "::nextTimeSlot() { return vlSymsp->TOP.");
+
+            putns(modp, "uint64_t " + topClassName() + "::nextTimeSlot() { return vlSymsp->TOP.");
             puts(delaySchedp->nameProtect());
             puts(".nextTimeSlot(); }\n");
         } else {
-            puts("bool " + topClassName() + "::eventsPending() { return false; }\n\n");
+            putns(modp, "bool " + topClassName() + "::eventsPending() { return false; }\n\n");
             puts("uint64_t " + topClassName() + "::nextTimeSlot() {\n");
             puts("VL_FATAL_MT(__FILE__, __LINE__, \"\", \"%Error: No delays in the "
                  "design\");\n");
@@ -450,7 +482,8 @@ class EmitCModel final : public EmitCFunc {
 
         if (!optSystemC()) {
             // ::name
-            puts("\nconst char* " + topClassName() + "::name() const {\n");
+            puts("\n");
+            putns(modp, "const char* " + topClassName() + "::name() const {\n");
             puts(/**/ "return vlSymsp->name();\n");
             puts("}\n");
         }
@@ -458,21 +491,23 @@ class EmitCModel final : public EmitCFunc {
         putSectionDelimiter("Invoke final blocks");
         // Forward declarations
         puts("\n");
-        puts("void " + topModNameProtected + "__" + protect("_eval_final") + selfDecl + ";\n");
+        putns(modp,
+              "void " + topModNameProtected + "__" + protect("_eval_final") + selfDecl + ";\n");
         // ::final
         puts("\nVL_ATTR_COLD void " + topClassName() + "::final() {\n");
         puts(/**/ topModNameProtected + "__" + protect("_eval_final") + "(&(vlSymsp->TOP));\n");
         puts("}\n");
 
         putSectionDelimiter("Implementations of abstract methods from VerilatedModel\n");
-        puts("const char* " + topClassName() + "::hierName() const { return vlSymsp->name(); }\n");
-        puts("const char* " + topClassName() + "::modelName() const { return \"" + topClassName()
-             + "\"; }\n");
-        puts("unsigned " + topClassName() + "::threads() const { return "
-             + cvtToStr(v3Global.opt.threads()) + "; }\n");
-        puts("void " + topClassName()
-             + "::prepareClone() const { contextp()->prepareClone(); }\n");
-        puts("void " + topClassName() + "::atClone() const {\n");
+        putns(modp, "const char* " + topClassName()
+                        + "::hierName() const { return vlSymsp->name(); }\n");
+        putns(modp, "const char* " + topClassName() + "::modelName() const { return \""
+                        + topClassName() + "\"; }\n");
+        putns(modp, "unsigned " + topClassName() + "::threads() const { return "
+                        + cvtToStr(v3Global.opt.threads()) + "; }\n");
+        putns(modp, "void " + topClassName()
+                        + "::prepareClone() const { contextp()->prepareClone(); }\n");
+        putns(modp, "void " + topClassName() + "::atClone() const {\n");
         if (v3Global.opt.threads() > 1) {
             puts("vlSymsp->__Vm_threadPoolp = static_cast<VlThreadPool*>(");
         }
@@ -481,8 +516,8 @@ class EmitCModel final : public EmitCFunc {
         puts(";\n}\n");
 
         if (v3Global.opt.trace()) {
-            puts("std::unique_ptr<VerilatedTraceConfig> " + topClassName()
-                 + "::traceConfig() const {\n");
+            putns(modp, "std::unique_ptr<VerilatedTraceConfig> " + topClassName()
+                            + "::traceConfig() const {\n");
             puts("return std::unique_ptr<VerilatedTraceConfig>{new VerilatedTraceConfig{");
             puts(v3Global.opt.useTraceParallel() ? "true" : "false");
             puts(v3Global.opt.useTraceOffload() ? ", true" : ", false");
@@ -498,14 +533,17 @@ class EmitCModel final : public EmitCFunc {
         putSectionDelimiter("Trace configuration");
 
         // Forward declaration
-        puts("\nvoid " + topModNameProtected + "__" + protect("trace_init_top") + "("
-             + topModNameProtected + "* vlSelf, " + v3Global.opt.traceClassBase()
-             + "* tracep);\n");
+        putns(modp, "\nvoid " + topModNameProtected + "__" + protect("trace_decl_types") + "("
+                        + v3Global.opt.traceClassBase() + "* tracep);\n");
+        putns(modp, "\nvoid " + topModNameProtected + "__" + protect("trace_init_top") + "("
+                        + topModNameProtected + "* vlSelf, " + v3Global.opt.traceClassBase()
+                        + "* tracep);\n");
 
         // Static helper function
-        puts("\nVL_ATTR_COLD static void " + protect("trace_init") + "(void* voidSelf, "
-             + v3Global.opt.traceClassBase() + "* tracep, uint32_t code) {\n");
-        putsDecoration("// Callback from tracep->open()\n");
+        puts("\n");
+        putns(modp, "VL_ATTR_COLD static void " + protect("trace_init") + "(void* voidSelf, "
+                        + v3Global.opt.traceClassBase() + "* tracep, uint32_t code) {\n");
+        putsDecoration(modp, "// Callback from tracep->open()\n");
         puts(voidSelfAssign(modp));
         puts(symClassAssign());
         puts("if (!vlSymsp->_vm_contextp__->calcUnusedSigs()) {\n");
@@ -516,22 +554,21 @@ class EmitCModel final : public EmitCFunc {
         puts("vlSymsp->__Vm_baseCode = code;\n");
         puts("tracep->pushPrefix(std::string{vlSymsp->name()}, "
              "VerilatedTracePrefixType::SCOPE_MODULE);\n");
+        puts(topModNameProtected + "__" + protect("trace_decl_types") + "(tracep);\n");
         puts(topModNameProtected + "__" + protect("trace_init_top") + "(vlSelf, tracep);\n");
         puts("tracep->popPrefix();\n");
         puts("}\n");
 
         // Forward declaration
-        puts("\nVL_ATTR_COLD void " + topModNameProtected + "__" + protect("trace_register") + "("
-             + topModNameProtected + "* vlSelf, " + v3Global.opt.traceClassBase()
-             + "* tracep);\n");
+        puts("\n");
+        putns(modp, "VL_ATTR_COLD void " + topModNameProtected + "__" + protect("trace_register")
+                        + "(" + topModNameProtected + "* vlSelf, " + v3Global.opt.traceClassBase()
+                        + "* tracep);\n");
 
-        const CFuncVector traceInitFuncps
-            = findFuncps([](const AstCFunc* nodep) { return nodep->dpiTraceInit(); });
-        for (const AstCFunc* const funcp : traceInitFuncps) emitCFuncDecl(funcp, modp);
-
-        // ::trace
-        puts("\nVL_ATTR_COLD void " + topClassName() + "::trace(");
-        puts(v3Global.opt.traceClassBase() + "C* tfp, int levels, int options) {\n");
+        // ::traceRegisterModel
+        puts("\n");
+        putns(modp, "VL_ATTR_COLD void " + topClassName() + "::traceBaseModel(");
+        puts("VerilatedTraceBaseC* tfp, int levels, int options) {\n");
         if (optSystemC()) {
             puts(/**/ "if (!sc_core::sc_get_curr_simcontext()->elaboration_done()) {\n");
             puts(/****/ "vl_fatal(__FILE__, __LINE__, name(), \"" + topClassName()
@@ -540,46 +577,20 @@ class EmitCModel final : public EmitCFunc {
                     "elaboration.\");\n");
             puts(/**/ "}");
         }
-        puts(/**/ "if (tfp->isOpen()) {\n");
+        puts(/**/ "(void)levels; (void)options;\n");  // Prevent unused variable warning
+        puts(/**/ v3Global.opt.traceClassBase() + "C* const stfp = dynamic_cast<"
+             + v3Global.opt.traceClassBase() + "C*>(tfp);\n");
+        puts(/**/ "if (VL_UNLIKELY(!stfp)) {\n");
         puts(/****/ "vl_fatal(__FILE__, __LINE__, __FILE__,\"'" + topClassName()
-             + +"::trace()' shall not be called after '" + v3Global.opt.traceClassBase()
-             + "C::open()'.\");\n");
+             + "::trace()' called on non-" + v3Global.opt.traceClassBase() + "C object;\"\n"
+             + "\" use --trace-fst with VerilatedFst object,"
+             + " and --trace with VerilatedVcd object\");\n");
         puts(/**/ "}\n");
-        puts(/**/ "if (false && levels && options) {}  // Prevent unused\n");
-        puts(/**/ "tfp->spTrace()->addModel(this);\n");
-        puts(/**/ "tfp->spTrace()->addInitCb(&" + protect("trace_init") + ", &(vlSymsp->TOP));\n");
+        puts(/**/ "stfp->spTrace()->addModel(this);\n");
+        puts(/**/ "stfp->spTrace()->addInitCb(&" + protect("trace_init")
+             + ", &(vlSymsp->TOP));\n");
         puts(/**/ topModNameProtected + "__" + protect("trace_register")
-             + "(&(vlSymsp->TOP), tfp->spTrace());\n");
-
-        if (!traceInitFuncps.empty()) {
-            puts(/**/ "if (levels > 0) {\n");
-            puts(/****/ "const QData tfpq = reinterpret_cast<QData>(tfp);\n");
-            for (const AstCFunc* const funcp : traceInitFuncps) {
-                // Some hackery to locate handle__V for trace_init_task
-                // Considered a pragma on the handle, but that still doesn't help us attach it here
-                string handle = funcp->name();
-                const size_t wr_len = std::strlen("__Vdpiimwrap_");
-                UASSERT_OBJ(handle.substr(0, wr_len) == "__Vdpiimwrap_", funcp,
-                            "Strange trace_init_task function name");
-                handle = "vlSymsp->TOP." + handle.substr(wr_len);
-                const string::size_type pos = handle.rfind("__DOT__");
-                UASSERT_OBJ(pos != string::npos, funcp, "Strange trace_init_task function name");
-                handle = handle.substr(0, pos) + "__DOT__handle___05FV";
-                puts(funcNameProtect(funcp, modp) + "(" + handle
-                     + ", tfpq, levels - 1, options);\n");
-            }
-            puts(/**/ "}\n");
-        }
-
-        puts("}\n");
-    }
-    void emitTraceOffMethods(AstNodeModule* modp) {
-        putSectionDelimiter("Trace configuration");
-        // ::trace
-        puts("\nVL_ATTR_COLD void " + topClassName() + "::trace(");
-        puts(v3Global.opt.traceClassBase() + "C* tfp, int levels, int options) {\n");
-        puts(/**/ "vl_fatal(__FILE__, __LINE__, __FILE__,\"'" + topClassName()
-             + +"::trace()' called on model that was Verilated without --trace option\");\n");
+             + "(&(vlSymsp->TOP), stfp->spTrace());\n");
         puts("}\n");
     }
 
@@ -602,11 +613,12 @@ class EmitCModel final : public EmitCFunc {
     }
 
     void emitImplementation(AstNodeModule* modp) {
-        UASSERT(!m_ofp, "Output file should not be open");
+        UASSERT(!ofp(), "Output file should not be open");
 
         const string filename = v3Global.opt.makeDir() + "/" + topClassName() + ".cpp";
-        newCFile(filename, /* slow: */ false, /* source: */ true);
-        m_ofp = v3Global.opt.systemC() ? new V3OutScFile{filename} : new V3OutCFile{filename};
+        setOutputFile(v3Global.opt.systemC() ? new V3OutScFile{filename}
+                                             : new V3OutCFile{filename},
+                      newCFile(filename, /* slow: */ false, /* source: */ true));
 
         ofp()->putsHeader();
         puts("// DESCRIPTION: Verilator output: "
@@ -622,18 +634,14 @@ class EmitCModel final : public EmitCFunc {
         emitDestructorImplementation();
         emitStandardMethods1(modp);
         emitStandardMethods2(modp);
-        if (v3Global.opt.trace()) {
-            emitTraceMethods(modp);
-        } else if (!v3Global.opt.systemC()) {
-            emitTraceOffMethods(modp);
-        }
+        if (v3Global.opt.trace()) emitTraceMethods(modp);
         if (v3Global.opt.savable()) emitSerializationFunctions();
 
-        VL_DO_CLEAR(delete m_ofp, m_ofp = nullptr);
+        closeOutputFile();
     }
 
     void emitDpiExportDispatchers(AstNodeModule* modp) {
-        UASSERT(!m_ofp, "Output file should not be open");
+        UASSERT(!ofp(), "Output file should not be open");
 
         // Emit DPI Export dispatchers
         for (AstNode* nodep = modp->stmtsp(); nodep; nodep = nodep->nextp()) {
@@ -644,19 +652,19 @@ class EmitCModel final : public EmitCFunc {
                 // Splitting file, so using parallel build.
                 v3Global.useParallelBuild(true);
                 // Close old file
-                VL_DO_CLEAR(delete m_ofp, m_ofp = nullptr);
+                closeOutputFile();
             }
 
-            if (!m_ofp) {
+            if (!ofp()) {
                 string filename = v3Global.opt.makeDir() + "/" + topClassName() + "__Dpi_Export";
                 filename = m_uniqueNames.get(filename);
                 filename += ".cpp";
-                newCFile(filename, /* slow: */ false, /* source: */ true);
-                m_ofp = v3Global.opt.systemC() ? new V3OutScFile{filename}
-                                               : new V3OutCFile{filename};
+                setOutputFile(v3Global.opt.systemC() ? new V3OutScFile{filename}
+                                                     : new V3OutCFile{filename},
+                              newCFile(filename, /* slow: */ false, /* source: */ true));
                 splitSizeReset();  // Reset file size tracking
                 m_lazyDecls.reset();
-                m_ofp->putsHeader();
+                ofp()->putsHeader();
                 puts(
                     "// DESCRIPTION: Verilator output: Implementation of DPI export functions.\n");
                 puts("//\n");
@@ -669,14 +677,14 @@ class EmitCModel final : public EmitCFunc {
             iterateConst(funcp);
         }
 
-        if (m_ofp) { VL_DO_CLEAR(delete m_ofp, m_ofp = nullptr); }
+        if (ofp()) closeOutputFile();
     }
 
     void main(AstNodeModule* modp) {
         m_modp = modp;
         emitHeader(modp);
         emitImplementation(modp);
-        if (v3Global.dpi()) { emitDpiExportDispatchers(modp); }
+        if (v3Global.dpi()) emitDpiExportDispatchers(modp);
     }
 
     // VISITORS

@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2001-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2001-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -30,8 +30,9 @@
 #include <condition_variable>
 #include <memory>
 #include <string>
-#include <unordered_map>
-#include <unordered_set>
+#include <type_traits>
+#include <map>
+#include <set>
 #include <vector>
 
 #include <deque>
@@ -48,10 +49,12 @@ class VerilatedTraceOffloadBuffer;
 //=============================================================================
 // Common enumerations
 
-enum class VerilatedTracePrefixType : uint32_t {
+enum class VerilatedTracePrefixType : uint8_t {
     // Note: Entries must match VTracePrefixType (by name, not necessarily by value)
     ARRAY_PACKED,
     ARRAY_UNPACKED,
+    ROOTIO_MODULE,  // $rootio, used when name()=="", other modules become peers
+    ROOTIO_WRAPPER,  // "Above" ROOTIO_MODULE
     SCOPE_MODULE,
     SCOPE_INTERFACE,
     STRUCT_PACKED,
@@ -60,7 +63,7 @@ enum class VerilatedTracePrefixType : uint32_t {
 };
 
 // Direction attribute for ports
-enum class VerilatedTraceSigDirection : uint32_t {
+enum class VerilatedTraceSigDirection : uint8_t {
     NONE,
     INPUT,
     OUTPUT,
@@ -68,7 +71,7 @@ enum class VerilatedTraceSigDirection : uint32_t {
 };
 
 // Kind of signal. Similar to nettype but with a few more alternatives
-enum class VerilatedTraceSigKind : uint32_t {
+enum class VerilatedTraceSigKind : uint8_t {
     PARAMETER,
     SUPPLY0,
     SUPPLY1,
@@ -80,7 +83,7 @@ enum class VerilatedTraceSigKind : uint32_t {
 };
 
 // Base data type of signal
-enum class VerilatedTraceSigType : uint32_t {
+enum class VerilatedTraceSigType : uint8_t {
     DOUBLE,
     INTEGER,
     BIT,
@@ -180,10 +183,25 @@ public:
 };
 
 //=============================================================================
+// VerilatedTraceBaseC - base class of all Verilated*C trace classes
+// Internal use only
+
+class VerilatedTraceBaseC VL_NOT_FINAL {
+    bool m_modelConnected = false;  // Model connected by calling Verilated::trace()
+public:
+    /// True if file currently open
+    virtual bool isOpen() const VL_MT_SAFE = 0;
+
+    // internal use only
+    bool modelConnected() const VL_MT_SAFE { return m_modelConnected; }
+    void modelConnected(bool flag) VL_MT_SAFE { m_modelConnected = flag; }
+};
+
+//=============================================================================
 // VerilatedTrace
 
-// T_Trace is the format specific subclass of VerilatedTrace.
-// T_Buffer is the format specific base class of VerilatedTraceBuffer.
+// T_Trace is the format-specific subclass of VerilatedTrace.
+// T_Buffer is the format-specific base class of VerilatedTraceBuffer.
 template <class T_Trace, class T_Buffer>
 class VerilatedTrace VL_NOT_FINAL {
 public:
@@ -204,16 +222,12 @@ private:
     friend Buffer;
     friend OffloadBuffer;
 
-    struct CallbackRecord {
-        // Note: would make these fields const, but some old STL implementations
-        // (the one in Ubuntu 14.04 with GCC 4.8.4 in particular) use the
-        // assignment operator on inserting into collections, so they don't work
-        // with const fields...
-        const union {  // The callback
-            initCb_t m_initCb;
-            dumpCb_t m_dumpCb;
-            dumpOffloadCb_t m_dumpOffloadCb;
-            cleanupCb_t m_cleanupCb;
+    struct CallbackRecord final {
+        union {  // The callback
+            const initCb_t m_initCb;
+            const dumpCb_t m_dumpCb;
+            const dumpOffloadCb_t m_dumpOffloadCb;
+            const cleanupCb_t m_cleanupCb;
         };
         const uint32_t m_fidx;  // The index of the tracing function
         void* const m_userp;  // The user pointer to pass to the callback (the symbol table)
@@ -238,7 +252,7 @@ private:
     bool m_offload = false;  // Use the offload thread
     bool m_parallel = false;  // Use parallel tracing
 
-    struct ParallelWorkerData {
+    struct ParallelWorkerData final {
         const dumpCb_t m_cb;  // The callback
         void* const m_userp;  // The use pointer to pass to the callback
         Buffer* const m_bufp;  // The buffer pointer to pass to the callback
@@ -283,7 +297,7 @@ private:
     uint64_t m_timeLastDump = 0;  // Last time we did a dump
     bool m_didSomeDump = false;  // Did at least one dump (i.e.: m_timeLastDump is valid)
     VerilatedContext* m_contextp = nullptr;  // The context used by the traced models
-    std::unordered_set<const VerilatedModel*> m_models;  // The collection of models being traced
+    std::set<const VerilatedModel*> m_models;  // The collection of models being traced
 
     void addCallbackRecord(std::vector<CallbackRecord>& cbVec, CallbackRecord&& cbRec)
         VL_MT_SAFE_EXCLUDES(m_mutex);
@@ -336,7 +350,7 @@ private:
 
 protected:
     //=========================================================================
-    // Internals available to format specific implementations
+    // Internals available to format-specific implementations
 
     mutable VerilatedMutex m_mutex;  // Ensure dump() etc only called from single thread
 
@@ -369,7 +383,7 @@ protected:
     }
 
     //=========================================================================
-    // Virtual functions to be provided by the format specific implementation
+    // Virtual functions to be provided by the format-specific implementation
 
     // Called when the trace moves forward to a new time point
     virtual void emitTimeChange(uint64_t timeui) = 0;
@@ -426,7 +440,7 @@ public:
 //=============================================================================
 // VerilatedTraceBuffer
 
-// T_Buffer is the format specific base class of VerilatedTraceBuffer.
+// T_Buffer is the format-specific base class of VerilatedTraceBuffer.
 // The format-specific hot-path methods use duck-typing via T_Buffer for performance.
 template <class T_Buffer>
 class VerilatedTraceBuffer VL_NOT_FINAL : public T_Buffer {
@@ -452,7 +466,7 @@ public:
     // Hot path internal interface to Verilator generated code
 
     // Implementation note: We rely on the following duck-typed implementations
-    // in the derived class T_Derived. These emit* functions record a format
+    // in the derived class T_Derived. These emit* functions record a format-
     // specific trace entry. Normally one would use pure virtual functions for
     // these here, but we cannot afford dynamic dispatch for calling these as
     // this is very hot code during tracing.
@@ -475,7 +489,8 @@ public:
     void fullQData(uint32_t* oldp, QData newval, int bits);
     void fullWData(uint32_t* oldp, const WData* newvalp, int bits);
     void fullDouble(uint32_t* oldp, double newval);
-    void fullEvent(uint32_t* oldp, const VlEventBase* newval);
+    void fullEvent(uint32_t* oldp, const VlEventBase* newvalp);
+    void fullEventTriggered(uint32_t* oldp);
 
     // In non-offload mode, these are called directly by the trace callbacks,
     // and are called chg*. In offload mode, they are called by the worker
@@ -512,9 +527,10 @@ public:
             }
         }
     }
-    VL_ATTR_ALWINLINE void chgEvent(uint32_t* oldp, const VlEventBase* newval) {
-        fullEvent(oldp, newval);
+    VL_ATTR_ALWINLINE void chgEvent(uint32_t* oldp, const VlEventBase* newvalp) {
+        if (newvalp->isTriggered()) fullEvent(oldp, newvalp);
     }
+    VL_ATTR_ALWINLINE void chgEventTriggered(uint32_t* oldp) { fullEventTriggered(oldp); }
     VL_ATTR_ALWINLINE void chgDouble(uint32_t* oldp, double newval) {
         double old;
         std::memcpy(&old, oldp, sizeof(old));
@@ -525,7 +541,7 @@ public:
 //=============================================================================
 // VerilatedTraceOffloadBuffer
 
-// T_Buffer is the format specific base class of VerilatedTraceBuffer.
+// T_Buffer is the format-specific base class of VerilatedTraceBuffer.
 // The format-specific hot-path methods use duck-typing via T_Buffer for performance.
 template <class T_Buffer>
 class VerilatedTraceOffloadBuffer final : public VerilatedTraceBuffer<T_Buffer> {
@@ -582,7 +598,7 @@ public:
         m_offloadBufferWritep[0] = (bits << 4) | VerilatedTraceOffloadCommand::CHG_WDATA;
         m_offloadBufferWritep[1] = code;
         m_offloadBufferWritep += 2;
-        for (int i = 0; i < (bits + 31) / 32; ++i) { *m_offloadBufferWritep++ = newvalp[i]; }
+        for (int i = 0; i < (bits + 31) / 32; ++i) *m_offloadBufferWritep++ = newvalp[i];
         VL_DEBUG_IF(assert(m_offloadBufferWritep <= m_offloadBufferEndp););
     }
     void chgDouble(uint32_t code, double newval) {
@@ -593,7 +609,10 @@ public:
         m_offloadBufferWritep += 4;
         VL_DEBUG_IF(assert(m_offloadBufferWritep <= m_offloadBufferEndp););
     }
-    void chgEvent(uint32_t code, const VlEventBase* newval) {
+    void chgEvent(uint32_t code, const VlEventBase* newvalp) {
+        if (newvalp->isTriggered()) chgEventTriggered(code);
+    }
+    void chgEventTriggered(uint32_t code) {
         m_offloadBufferWritep[0] = VerilatedTraceOffloadCommand::CHG_EVENT;
         m_offloadBufferWritep[1] = code;
         m_offloadBufferWritep += 2;

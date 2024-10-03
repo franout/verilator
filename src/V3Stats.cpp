@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2005-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2005-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -22,6 +22,11 @@
 #include <map>
 
 VL_DEFINE_DEBUG_FUNCTIONS;
+
+//######################################################################
+// Statics
+
+V3Mutex V3Stats::s_mutex;
 
 //######################################################################
 // Stats class functions
@@ -104,8 +109,8 @@ public:
         iterateConst(nodep);
 
         // Shorthand
-        const auto addStat = [&](const std::string& name, double count) {  //
-            V3Stats::addStat(stage, name, count);
+        const auto addStat = [&](const std::string& name, double count, unsigned precision = 0) {
+            V3Stats::addStat(stage, name, count, precision);
         };
 
         // Variable widths
@@ -124,11 +129,23 @@ public:
             }
         }
 
-        // Node types
+        // Node types (also total memory usage)
         const auto typeName = [](int type) { return std::string{VNType{type}.ascii()}; };
+        const auto typeSize = [](int type) { return VNType{type}.typeInfo()->m_sizeof; };
+        size_t totalNodeMemoryUsage = 0;
         for (int t = 0; t < VNType::_ENUM_END; ++t) {
             if (const uint64_t count = m_counters.m_statTypeCount[t]) {
+                totalNodeMemoryUsage += count * typeSize(t);
                 addStat("Node count, " + typeName(t), count);
+            }
+        }
+        addStat("Node memory TOTAL (MiB)", totalNodeMemoryUsage >> 20);
+
+        // Node Memory usage
+        for (int t = 0; t < VNType::_ENUM_END; ++t) {
+            if (const uint64_t count = m_counters.m_statTypeCount[t]) {
+                const double share = 100.0 * count * typeSize(t) / totalNodeMemoryUsage;
+                addStat("Node memory share (%), " + typeName(t), share, 2);
             }
         }
 
@@ -144,7 +161,7 @@ public:
         // Branch predictions
         for (int t = 0; t < VBranchPred::_ENUM_END; ++t) {
             if (const uint64_t c = m_counters.m_statPred[t]) {
-                addStat(std::string{"Branch prediction, "} + VBranchPred{t}.ascii(), c);
+                addStat("Branch prediction, "s + VBranchPred{t}.ascii(), c);
             }
         }
     }
@@ -152,6 +169,11 @@ public:
 
 //######################################################################
 // Top Stats class
+
+void V3Stats::addStatSum(const string& name, double count) VL_MT_SAFE_EXCLUDES(s_mutex) {
+    V3LockGuard lock{s_mutex};
+    addStat(V3Statistic{"*", name, count, 0, true});
+}
 
 void V3Stats::statsStageAll(AstNetlist* nodep, const std::string& stage, bool fastOnly) {
     StatsVisitor{nodep, stage, fastOnly};

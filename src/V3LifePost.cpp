@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -28,8 +28,8 @@
 
 #include "V3LifePost.h"
 
+#include "V3ExecGraph.h"
 #include "V3GraphPathChecker.h"
-#include "V3PartitionGraph.h"
 #include "V3Stats.h"
 
 #include <memory>  // for std::unique_ptr -> auto_ptr or unique_ptr
@@ -41,7 +41,6 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 // LifePost class functions
 
 class LifePostElimVisitor final : public VNVisitor {
-private:
     bool m_tracingCall = false;  // Iterating into a CCall to a CFunc
 
     // NODE STATE
@@ -96,7 +95,7 @@ public:
 // Location within the execution graph, identified by an mtask
 // and a sequence number within the mtask:
 
-struct LifeLocation {
+struct LifeLocation final {
     const ExecMTask* mtaskp = nullptr;
     uint32_t sequence = 0;
 
@@ -114,7 +113,7 @@ public:
     }
 };
 
-struct LifePostLocation {
+struct LifePostLocation final {
     LifeLocation loc;
     AstAssignPost* nodep = nullptr;
     LifePostLocation() = default;
@@ -127,10 +126,10 @@ struct LifePostLocation {
 // LifePost delay elimination
 
 class LifePostDlyVisitor final : public VNVisitor {
-private:
     // NODE STATE
     // AstVarScope::user1()    -> bool: referenced outside _eval__nba
     // AstVarScope::user4()    -> AstVarScope*: Passed to LifePostElim to substitute this var
+    const VNUser1InUse m_inuser1;
     const VNUser4InUse m_inuser4;
 
     // STATE
@@ -150,7 +149,7 @@ private:
     // Map each dly var to its AstAssignPost* node and the location thereof
     std::unordered_map<const AstVarScope*, LifePostLocation> m_assignposts;
 
-    const V3Graph* m_mtasksGraphp = nullptr;  // Mtask tracking graph
+    V3Graph* m_mtasksGraphp = nullptr;  // Mtask tracking graph
     std::unique_ptr<GraphPathChecker> m_checker;
 
     const AstCFunc* const m_evalNbap;  // The _eval__nba function
@@ -252,8 +251,6 @@ private:
 
     // VISITORS
     void visit(AstTopScope* nodep) override {
-        AstNode::user4ClearTree();  // user4p() used on entire tree
-
         // First, build maps of every location (mtask and sequence
         // within the mtask) where each varscope is read, and written.
         iterateChildren(nodep);
@@ -328,9 +325,8 @@ private:
             UASSERT_OBJ(!m_mtasksGraphp, nodep, "Cannot handle more than one AstExecGraph");
             m_mtasksGraphp = nodep->depGraphp();
         }
-        for (V3GraphVertex* mtaskVxp = nodep->depGraphp()->verticesBeginp(); mtaskVxp;
-             mtaskVxp = mtaskVxp->verticesNextp()) {
-            const ExecMTask* const mtaskp = mtaskVxp->as<ExecMTask>();
+        for (V3GraphVertex& mtaskVtx : nodep->depGraphp()->vertices()) {
+            const ExecMTask* const mtaskp = mtaskVtx.as<ExecMTask>();
             m_execMTaskp = mtaskp;
             m_sequence = 0;
             iterate(mtaskp->bodyp());
@@ -366,5 +362,5 @@ void V3LifePost::lifepostAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     // Mark redundant AssignPost
     { LifePostDlyVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("life_post", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("life_post", 0, dumpTreeEitherLevel() >= 3);
 }

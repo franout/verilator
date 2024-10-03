@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -51,11 +51,10 @@ void VlcTop::readCoverage(const string& filename, bool nonfatal) {
                 if (line[secspace] == '\'' && line[secspace + 1] == ' ') break;
             }
             const string point = line.substr(3, secspace - 3);
-            uint64_t hits = std::atoll(line.c_str() + secspace + 1);
+            const uint64_t hits = std::atoll(line.c_str() + secspace + 1);
             // UINFO(9,"   point '"<<point<<"'"<<" "<<hits<<endl);
 
-            uint64_t pointnum = points().findAddPoint(point, hits);
-            if (pointnum) {}  // Prevent unused
+            const uint64_t pointnum = points().findAddPoint(point, hits);
             if (opt.rank()) {  // Only if ranking - uses a lot of memory
                 if (hits >= VlcBuckets::sufficient()) {
                     points().pointNumber(pointnum).testsCoveringInc();
@@ -117,17 +116,35 @@ void VlcTop::writeInfo(const string& filename) {
         VlcSource& source = si.second;
         os << "SF:" << source.name() << '\n';
         VlcSource::LinenoMap& lines = source.lines();
+        int branchesFound = 0;
+        int branchesHit = 0;
         for (auto& li : lines) {
-            const VlcSourceCount& sc = li.second;
-            os << "DA:" << sc.lineno() << "," << sc.count() << "\n";
+            VlcSourceCount& sc = li.second;
+            os << "DA:" << sc.lineno() << "," << sc.maxCount() << "\n";
+            int num_branches = sc.points().size();
+            if (num_branches == 1) continue;
+            branchesFound += num_branches;
+            int point_num = 0;
+            for (const auto& point : sc.points()) {
+                os << "BRDA:" << sc.lineno() << ",";
+                os << "0,";
+                os << point_num << ",";
+                os << point->count() << "\n";
+
+                branchesHit += opt.countOk(point->count());
+                ++point_num;
+            }
         }
+        os << "BRF:" << branchesFound << '\n';
+        os << "BRH:" << branchesHit << '\n';
+
         os << "end_of_record\n";
     }
 }
 
 //********************************************************************
 
-struct CmpComputrons {
+struct CmpComputrons final {
     bool operator()(const VlcTest* lhsp, const VlcTest* rhsp) const {
         if (lhsp->computrons() != rhsp->computrons()) {
             return lhsp->computrons() < rhsp->computrons();
@@ -196,11 +213,10 @@ void VlcTop::annotateCalc() {
         const int lineno = point.lineno();
         if (!filename.empty() && lineno != 0) {
             VlcSource& source = sources().findNewSource(filename);
-            const bool ok = point.ok(opt.annotateMin());
             UINFO(9, "AnnoCalc count " << filename << ":" << lineno << ":" << point.column() << " "
                                        << point.count() << " " << point.linescov() << '\n');
             // Base coverage
-            source.lineIncCount(lineno, point.count(), ok, &point);
+            source.insertPoint(lineno, &point);
             // Additional lines covered by this statement
             bool range = false;
             int start = 0;
@@ -209,7 +225,7 @@ void VlcTop::annotateCalc() {
             for (const char* covp = linescov.c_str(); true; ++covp) {
                 if (!*covp || *covp == ',') {  // Ending
                     for (int lni = start; start && lni <= end; ++lni) {
-                        source.lineIncCount(lni, point.count(), ok, &point);
+                        source.insertPoint(lni, &point);
                     }
                     if (!*covp) break;
                     start = 0;  // Prep for next
@@ -243,7 +259,7 @@ void VlcTop::annotateCalcNeeded() {
             VlcSourceCount& sc = li.second;
             // UINFO(0, "Source "<<source.name()<<":"<<sc.lineno()<<":"<<sc.column()<<endl);
             ++totCases;
-            if (sc.ok()) {
+            if (opt.countOk(sc.minCount())) {
                 ++totOk;
             } else {
                 source.needed(true);
@@ -294,8 +310,16 @@ void VlcTop::annotateOutputFiles(const string& dirname) {
                 VlcSourceCount& sc = lit->second;
                 // UINFO(0,"Source
                 // "<<source.name()<<":"<<sc.lineno()<<":"<<sc.column()<<endl);
-                os << (sc.ok() ? " " : "%") << std::setfill('0') << std::setw(6) << sc.count()
-                   << " " << line << '\n';
+                const bool minOk = opt.countOk(sc.minCount());
+                const bool maxOk = opt.countOk(sc.maxCount());
+                if (minOk) {
+                    os << " ";
+                } else if (maxOk) {
+                    os << "~";
+                } else {
+                    os << "%";
+                }
+                os << std::setfill('0') << std::setw(6) << sc.maxCount() << " " << line << '\n';
 
                 if (opt.annotatePoints()) {
                     for (auto& pit : sc.points()) pit->dumpAnnotate(os, opt.annotateMin());

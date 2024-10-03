@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -22,7 +22,6 @@
 
 #include "V3Ast.h"
 #include "V3Error.h"
-#include "V3ThreadSafety.h"
 
 #include <utility>
 #include <vector>
@@ -55,7 +54,8 @@ public:
     static void taskAll(AstNetlist* nodep) VL_MT_DISABLED;
     /// Return vector of [port, pin-connects-to]  (SLOW)
     static V3TaskConnects taskConnects(AstNodeFTaskRef* nodep, AstNode* taskStmtsp,
-                                       V3TaskConnectState* statep = nullptr) VL_MT_DISABLED;
+                                       V3TaskConnectState* statep = nullptr,
+                                       bool makeChanges = true) VL_MT_DISABLED;
     static void taskConnectWrap(AstNodeFTaskRef* nodep, const V3TaskConnects& tconnects,
                                 V3TaskConnectState* statep,
                                 const std::set<const AstVar*>& argWrap) VL_MT_DISABLED;

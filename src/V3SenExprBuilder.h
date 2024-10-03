@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -91,7 +91,7 @@ class SenExprBuilder final {
     }
     AstVarScope* getPrev(AstNodeExpr* exprp) {
         FileLine* const flp = exprp->fileline();
-        const auto rdCurr = [=]() { return getCurr(exprp); };
+        const auto rdCurr = [this, exprp]() { return getCurr(exprp); };
 
         AstNode* scopeExprp = exprp;
         if (AstVarRef* const refp = VN_CAST(exprp, VarRef)) scopeExprp = refp->varScopep();
@@ -139,7 +139,7 @@ class SenExprBuilder final {
                 return prevp;
             }
 
-            if (AstUnpackArrayDType* const dtypep = VN_CAST(exprp->dtypep(), UnpackArrayDType)) {
+            if (VN_IS(exprp->dtypep()->skipRefp(), UnpackArrayDType)) {
                 AstCMethodHard* const cmhp = new AstCMethodHard{flp, wrPrev(), "assign", rdCurr()};
                 cmhp->dtypeSetVoid();
                 m_postUpdates.push_back(cmhp->makeStmt());
@@ -151,22 +151,24 @@ class SenExprBuilder final {
         return prevp;
     }
 
-    std::pair<AstNodeExpr*, bool> createTerm(AstSenItem* senItemp) {
+    std::pair<AstNodeExpr*, bool> createTerm(const AstSenItem* senItemp) {
         FileLine* const flp = senItemp->fileline();
         AstNodeExpr* const senp = senItemp->sensp();
 
-        const auto currp = [=]() { return getCurr(senp); };
-        const auto prevp = [=]() { return new AstVarRef{flp, getPrev(senp), VAccess::READ}; };
+        const auto currp = [this, senp]() { return getCurr(senp); };
+        const auto prevp = [this, flp, senp]() {
+            return new AstVarRef{flp, getPrev(senp), VAccess::READ};
+        };
         const auto lsb = [=](AstNodeExpr* opp) { return new AstSel{flp, opp, 0, 1}; };
 
         // All event signals should be 1-bit at this point
         switch (senItemp->edgeType()) {
-        case VEdgeType::ET_ILLEGAL:
-            return {nullptr, false};  // We already warn for this in V3LinkResolve
         case VEdgeType::ET_CHANGED:
         case VEdgeType::ET_HYBRID:  //
-            if (VN_IS(senp->dtypep(), UnpackArrayDType)) {
-                AstCMethodHard* const resultp = new AstCMethodHard{flp, currp(), "neq", prevp()};
+            if (VN_IS(senp->dtypep()->skipRefp(), UnpackArrayDType)) {
+                // operand order reversed to avoid calling neq() method on non-VlUnpacked type, see
+                // issue #5125
+                AstCMethodHard* const resultp = new AstCMethodHard{flp, prevp(), "neq", currp()};
                 resultp->dtypeSetBit();
                 return {resultp, true};
             }
@@ -190,14 +192,6 @@ class SenExprBuilder final {
                 AstCMethodHard* const clearp = new AstCMethodHard{flp, currp(), "clearFired"};
                 clearp->dtypeSetVoid();
                 ifp->addThensp(clearp->makeStmt());
-
-                // Enqueue for clearing 'triggered' state on next eval
-                AstTextBlock* const blockp = new AstTextBlock{flp};
-                ifp->addThensp(blockp);
-                const auto add = [&](const string& text) { blockp->addText(flp, text, true); };
-                add("vlSymsp->enqueueTriggeredEventForClearing(");
-                blockp->addNodesp(currp());
-                add(");\n");
             }
 
             // Get 'fired' state
@@ -216,6 +210,15 @@ class SenExprBuilder final {
 public:
     // Returns the expression computing the trigger, and a bool indicating that
     // this trigger should be fired on the first evaluation (at initialization)
+    std::pair<AstNodeExpr*, bool> build(const AstSenItem* senItemp) {
+        auto term = createTerm(senItemp);
+        if (AstNodeExpr* const condp = senItemp->condp()) {
+            term.first = new AstAnd{senItemp->fileline(), condp->cloneTreePure(false), term.first};
+        }
+        return term;
+    }
+
+    // Like above, but for a whole SenTree
     std::pair<AstNodeExpr*, bool> build(const AstSenTree* senTreep) {
         FileLine* const flp = senTreep->fileline();
         AstNodeExpr* resultp = nullptr;
@@ -223,7 +226,7 @@ public:
         for (AstSenItem* senItemp = senTreep->sensesp(); senItemp;
              senItemp = VN_AS(senItemp->nextp(), SenItem)) {
             const auto& pair = createTerm(senItemp);
-            if (AstNodeExpr* const termp = pair.first) {
+            if (AstNodeExpr* termp = pair.first) {
                 resultp = resultp ? new AstOr{flp, resultp, termp} : termp;
                 firedAtInitialization |= pair.second;
             }

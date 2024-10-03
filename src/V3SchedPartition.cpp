@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -184,8 +184,7 @@ class SchedGraphBuilder final : public VNVisitor {
 
         // Clocked or hybrid logic has explicit sensitivity, so add edge from sensitivity vertex
         if (!m_senTreep->hasCombo()) {
-            m_senTreep->foreach([=](AstSenItem* senItemp) {
-                if (senItemp->isIllegal()) return;
+            m_senTreep->foreach([this, nodep, logicVtxp](AstSenItem* senItemp) {
                 UASSERT_OBJ(senItemp->isClocked() || senItemp->isHybrid(), nodep,
                             "Non-clocked SenItem under clocked SenTree");
                 V3GraphVertex* const eventVtxp = getSenVertex(senItemp);
@@ -194,7 +193,7 @@ class SchedGraphBuilder final : public VNVisitor {
         }
 
         // Add edges based on references
-        nodep->foreach([=](const AstVarRef* vrefp) {
+        nodep->foreach([this, logicVtxp](const AstVarRef* vrefp) {
             AstVarScope* const vscp = vrefp->varScopep();
             if (vrefp->access().isReadOrRW() && m_readTriggersThisLogic(vscp)) {
                 new V3GraphEdge{m_graphp, getVarVertex(vscp), logicVtxp, 10};
@@ -206,7 +205,7 @@ class SchedGraphBuilder final : public VNVisitor {
 
         // If the logic calls a 'context' DPI import, it might fire the DPI Export trigger
         if (m_dpiExportTriggerp) {
-            nodep->foreach([=](const AstCCall* callp) {
+            nodep->foreach([this, logicVtxp](const AstCCall* callp) {
                 if (!callp->funcp()->dpiImportWrapper()) return;
                 if (!callp->funcp()->dpiContext()) return;
                 new V3GraphEdge{m_graphp, logicVtxp, getVarVertex(m_dpiExportTriggerp), 10};
@@ -291,13 +290,13 @@ public:
     }
 };
 
-void colorActiveRegion(const V3Graph& graph) {
+void colorActiveRegion(V3Graph& graph) {
     // Work queue for depth first traversal
     std::vector<V3GraphVertex*> queue{};
 
     // Trace from all SchedSenVertex
-    for (V3GraphVertex* vtxp = graph.verticesBeginp(); vtxp; vtxp = vtxp->verticesNextp()) {
-        if (const auto activeEventVtxp = vtxp->cast<SchedSenVertex>()) {
+    for (V3GraphVertex& vtx : graph.vertices()) {
+        if (const auto activeEventVtxp = vtx.cast<SchedSenVertex>()) {
             queue.push_back(activeEventVtxp);
         }
     }
@@ -314,17 +313,15 @@ void colorActiveRegion(const V3Graph& graph) {
         vtx.color(1);
 
         // Enqueue all parent vertices that feed this vertex.
-        for (V3GraphEdge* edgep = vtx.inBeginp(); edgep; edgep = edgep->inNextp()) {
-            queue.push_back(edgep->fromp());
-        }
+        for (V3GraphEdge& edge : vtx.inEdges()) queue.push_back(edge.fromp());
 
         // If this is a logic vertex, also enqueue all variable vertices that are driven from this
         // logic. This will ensure that if a variable is set in the active region, then all
         // settings of that variable will be in the active region.
         if (vtx.is<SchedLogicVertex>()) {
-            for (V3GraphEdge* edgep = vtx.outBeginp(); edgep; edgep = edgep->outNextp()) {
-                UASSERT(edgep->top()->is<SchedVarVertex>(), "Should be var vertex");
-                queue.push_back(edgep->top());
+            for (V3GraphEdge& edge : vtx.outEdges()) {
+                UASSERT(edge.top()->is<SchedVarVertex>(), "Should be var vertex");
+                queue.push_back(edge.top());
             }
         }
     }
@@ -347,8 +344,8 @@ LogicRegions partition(LogicByScope& clockedLogic, LogicByScope& combinationalLo
 
     LogicRegions result;
 
-    for (V3GraphVertex* vtxp = graphp->verticesBeginp(); vtxp; vtxp = vtxp->verticesNextp()) {
-        if (const auto lvtxp = vtxp->cast<SchedLogicVertex>()) {
+    for (V3GraphVertex& vtx : graphp->vertices()) {
+        if (const auto lvtxp = vtx.cast<SchedLogicVertex>()) {
             LogicByScope& lbs = lvtxp->color() ? result.m_act : result.m_nba;
             AstNode* const logicp = lvtxp->logicp();
             logicp->unlinkFrBack();

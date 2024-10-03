@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2001-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2001-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -43,14 +43,14 @@ private:
     friend VerilatedVcdBuffer;  // Give the buffer access to the private bits
 
     //=========================================================================
-    // VCD specific internals
+    // VCD-specific internals
 
     VerilatedVcdFile* m_filep;  // File we're writing to
     bool m_fileNewed;  // m_filep needs destruction
     bool m_isOpen = false;  // True indicates open file
     std::string m_filename;  // Filename we're writing to (if open)
     uint64_t m_rolloverSize = 0;  // File size to rollover at
-    unsigned m_indent = 0;  // Indentation depth
+    int m_indent = 0;  // Indentation depth
 
     char* m_wrBufp;  // Output buffer
     char* m_wrFlushp;  // Output buffer flush trigger location
@@ -214,7 +214,7 @@ class VerilatedVcdBuffer VL_NOT_FINAL {
     // Implementation of VerilatedTraceBuffer interface
     // Implementations of duck-typed methods for VerilatedTraceBuffer. These are
     // called from only one place (the full* methods), so always inline them.
-    VL_ATTR_ALWINLINE void emitEvent(uint32_t code, const VlEventBase* newval);
+    VL_ATTR_ALWINLINE void emitEvent(uint32_t code);
     VL_ATTR_ALWINLINE void emitBit(uint32_t code, CData newval);
     VL_ATTR_ALWINLINE void emitCData(uint32_t code, CData newval, int bits);
     VL_ATTR_ALWINLINE void emitSData(uint32_t code, SData newval, int bits);
@@ -251,7 +251,7 @@ public:
 /// Class representing a VCD dump file in C standalone (no SystemC)
 /// simulations.  Also derived for use in SystemC simulations.
 
-class VerilatedVcdC VL_NOT_FINAL {
+class VerilatedVcdC VL_NOT_FINAL : public VerilatedTraceBaseC {
     VerilatedVcd m_sptrace;  // Trace file being created
 
     // CONSTRUCTORS
@@ -267,7 +267,7 @@ public:
     // METHODS - User called
 
     /// Return if file is open
-    bool isOpen() const VL_MT_SAFE { return m_sptrace.isOpen(); }
+    bool isOpen() const override VL_MT_SAFE { return m_sptrace.isOpen(); }
     /// Open a new VCD file
     /// This includes a complete header dump each time it is called,
     /// just as if this object was deleted and reconstructed.
@@ -283,7 +283,10 @@ public:
     /// first may be removed.  Cat files together to create viewable vcd.
     void rolloverSize(size_t size) VL_MT_SAFE { m_sptrace.rolloverSize(size); }
     /// Close dump
-    void close() VL_MT_SAFE { m_sptrace.close(); }
+    void close() VL_MT_SAFE {
+        m_sptrace.close();
+        modelConnected(false);
+    }
     /// Flush dump
     void flush() VL_MT_SAFE { m_sptrace.flush(); }
     /// Write one cycle of dump data
@@ -301,12 +304,12 @@ public:
 
     // Set time units (s/ms, defaults to ns)
     // Users should not need to call this, as for Verilated models, these
-    // propage from the Verilated default timeunit
+    // propagate from the Verilated default timeunit
     void set_time_unit(const char* unit) VL_MT_SAFE { m_sptrace.set_time_unit(unit); }
     void set_time_unit(const std::string& unit) VL_MT_SAFE { m_sptrace.set_time_unit(unit); }
     // Set time resolution (s/ms, defaults to ns)
     // Users should not need to call this, as for Verilated models, these
-    // propage from the Verilated default timeprecision
+    // propagate from the Verilated default timeprecision
     void set_time_resolution(const char* unit) VL_MT_SAFE { m_sptrace.set_time_resolution(unit); }
     void set_time_resolution(const std::string& unit) VL_MT_SAFE {
         m_sptrace.set_time_resolution(unit);

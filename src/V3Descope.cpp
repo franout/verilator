@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -33,7 +33,6 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 //######################################################################
 
 class DescopeVisitor final : public VNVisitor {
-private:
     // NODE STATE
     //  Cleared entire netlist
     //   AstCFunc::user()               // bool.  Indicates processing completed
@@ -194,7 +193,7 @@ private:
                 // to come up with some return value
                 // newfuncp->addStmtsp(new AstDisplay(newfuncp->fileline(),
                 //                                   VDisplayType::DT_WARNING,
-                //                                   string{"%%Error: "}+name+"() called with bad
+                //                                   "%%Error: "s+name+"() called with bad
                 //                                   scope", nullptr));
                 // newfuncp->addStmtsp(new AstStop(newfuncp->fileline()));
                 if (debug() >= 9) newfuncp->dumpTree("-  newfunc: ");
@@ -224,8 +223,7 @@ private:
     }
     void visit(AstVarScope* nodep) override {
         // Delete the varscope when we're finished
-        nodep->unlinkFrBack();
-        pushDeletep(nodep);
+        VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
     }
     void visit(AstNodeVarRef* nodep) override {
         iterateChildren(nodep);
@@ -301,5 +299,5 @@ public:
 void V3Descope::descopeAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { DescopeVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("descope", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("descope", 0, dumpTreeEitherLevel() >= 3);
 }

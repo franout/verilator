@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -19,8 +19,6 @@
 
 #include "config_build.h"
 #include "verilatedos.h"
-
-#include "V3ThreadSafety.h"
 
 #include "config_rev.h"
 
@@ -65,6 +63,7 @@ public:
     string annotateOut() const { return m_annotateOut; }
     bool annotateAll() const { return m_annotateAll; }
     int annotateMin() const { return m_annotateMin; }
+    bool countOk(uint64_t count) const { return count >= static_cast<uint64_t>(m_annotateMin); }
     bool annotatePoints() const { return m_annotatePoints; }
     bool rank() const { return m_rank; }
     bool unlink() const { return m_unlink; }

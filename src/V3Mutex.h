@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2005-2023 by Wilson Snyder.  This program is free software; you can
+// Copyright 2005-2024 by Wilson Snyder.  This program is free software; you can
 // redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -39,11 +39,10 @@
 
 #define VL_LOCK_SPINS 50000  /// Number of times to spin for a mutex before yielding
 
-// MutexConfig class that allows to configure how mutex and lockgurads behave
+// MutexConfig class that allows to configure how mutex and lockguards behave
 // once configured and locked, it cannot be changed. Configuration and lock needs to be
 // done before starting any additional threads.
 class V3MutexConfig final {
-private:
     // Allows to disable mutexes and lockguards.
     // Use carefully as it can cause undefined behavior when used inappropriately.
     // All mutexes needs to be unlocked.
@@ -78,7 +77,6 @@ public:
 /// Mutex, wrapped to allow -fthread_safety checks
 template <typename T>
 class VL_CAPABILITY("mutex") V3MutexImp final {
-private:
     T m_mutex;  // Mutex
 
 public:
@@ -103,7 +101,7 @@ public:
     }
     /// Release/unlock mutex
     void unlock() VL_RELEASE() VL_MT_SAFE {
-        if (V3MutexConfig::s().enable()) { m_mutex.unlock(); }
+        if (V3MutexConfig::s().enable()) m_mutex.unlock();
     }
     /// Try to acquire mutex.  Returns true on success, and false on failure.
     bool try_lock() VL_TRY_ACQUIRE(true) VL_MT_SAFE {
@@ -113,21 +111,6 @@ public:
     void assumeLocked() VL_ASSERT_CAPABILITY(this) VL_MT_SAFE {}
     /// Pretend that the mutex is being unlocked. Purely for Clang thread safety analyzer.
     void pretendUnlock() VL_RELEASE() VL_MT_SAFE {}
-    /// Acquire/lock mutex and check for stop request
-    /// It tries to lock the mutex and if it fails, it check if stop request was send.
-    /// It returns after locking mutex.
-    /// This function should be extracted to V3ThreadPool, but due to clang thread-safety
-    /// limitations it needs to be placed here.
-    void lockCheckStopRequest(std::function<void()> checkStopRequestFunction)
-        VL_ACQUIRE() VL_MT_SAFE {
-        if (V3MutexConfig::s().enable()) {
-            while (true) {
-                checkStopRequestFunction();
-                if (m_mutex.try_lock()) return;
-                VL_CPU_RELAX();
-            }
-        }
-    }
 };
 
 /// Lock guard for mutex (ala std::unique_lock), wrapped to allow -fthread_safety checks

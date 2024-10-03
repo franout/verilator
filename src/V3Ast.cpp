@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -17,11 +17,11 @@
 #include "V3PchAstMT.h"
 
 #include "V3Broken.h"
-#include "V3EmitV.h"
 #include "V3File.h"
 
 #include <iomanip>
 #include <memory>
+#include <sstream>
 
 VL_DEFINE_DEBUG_FUNCTIONS;
 
@@ -97,18 +97,17 @@ AstNode* AstNode::abovep() const {
 string AstNode::encodeName(const string& namein) {
     // Encode signal name raw from parser, then not called again on same signal
     string out;
-    for (string::const_iterator pos = namein.begin(); pos != namein.end(); ++pos) {
+    out.reserve(namein.size());
+    for (auto pos = namein.begin(); pos != namein.end(); ++pos) {
         if ((pos == namein.begin()) ? std::isalpha(pos[0])  // digits can't lead identifiers
                                     : std::isalnum(pos[0])) {
             out += pos[0];
         } else if (pos[0] == '_') {
+            out += pos[0];
+            if (pos + 1 == namein.end()) break;
             if (pos[1] == '_') {
-                out += "_";
-                out += "__05F";  // hex(_) = 0x5F
                 ++pos;
-                if (pos == namein.end()) break;
-            } else {
-                out += pos[0];
+                out += "__05F";  // hex(_) = 0x5F
             }
         } else {
             // Need the leading 0 so this will never collide with
@@ -802,7 +801,6 @@ AstNode* AstNode::cloneTreeIter(bool needPure) {
                          << this->warnMore()
                          << "... Suggest use a temporary variable in place of this expression");
         // this->v3fatalSrc("cloneTreePure debug backtrace");  // Comment in to debug where caused
-        // it
     }
     AstNode* const newp = this->clone();
     if (this->m_op1p) newp->op1p(this->m_op1p->cloneTreeIterList(needPure));
@@ -1117,6 +1115,7 @@ bool AstNode::sameTreeIter(const AstNode* node1p, const AstNode* node2p, bool ig
 void AstNode::checkTreeIter(const AstNode* prevBackp) const VL_MT_STABLE {
     // private: Check a tree and children
     UASSERT_OBJ(prevBackp == this->backp(), this, "Back node inconsistent");
+    // cppcheck-suppress danglingTempReference
     const VNTypeInfo& typeInfo = *type().typeInfo();
     for (int i = 1; i <= 4; i++) {
         AstNode* nodep = nullptr;
@@ -1127,6 +1126,7 @@ void AstNode::checkTreeIter(const AstNode* prevBackp) const VL_MT_STABLE {
         case 4: nodep = op4p(); break;
         default: this->v3fatalSrc("Bad case"); break;
         }
+        // cppcheck-suppress danglingTempReference
         const char* opName = typeInfo.m_opNamep[i - 1];
         switch (typeInfo.m_opType[i - 1]) {
         case VNTypeInfo::OP_UNUSED:
@@ -1143,7 +1143,7 @@ void AstNode::checkTreeIter(const AstNode* prevBackp) const VL_MT_STABLE {
         case VNTypeInfo::OP_LIST:
             if (const AstNode* const headp = nodep) {
                 const AstNode* backp = this;
-                const AstNode* tailp = headp;
+                const AstNode* tailp;
                 const AstNode* opp = headp;
                 do {
                     opp->checkTreeIter(backp);
@@ -1169,8 +1169,50 @@ void AstNode::checkTreeIter(const AstNode* prevBackp) const VL_MT_STABLE {
         default: this->v3fatalSrc("Bad case"); break;
         }
     }
+    if (v3Global.opt.debugWidth() && v3Global.widthMinUsage() == VWidthMinUsage::VERILOG_WIDTH) {
+        if (const AstNodeExpr* const exprp = VN_CAST(this, NodeExpr)) {
+            const char* const whyp = exprp->widthMismatch();
+            if (whyp) {
+                auto dtypeStr = [](const AstNodeExpr* exprp) VL_MT_STABLE {
+                    std::ostringstream ss;
+                    exprp->dtypep()->dumpSmall(ss);
+                    return ss.str();
+                };
+                if (const AstNodeUniop* const uniopp = VN_CAST(exprp, NodeUniop)) {
+                    UASSERT_OBJ(!whyp, uniopp,
+                                "widthMismatch detected " << whyp << "OUT:" << dtypeStr(uniopp)
+                                                          << " LHS:" << dtypeStr(uniopp->lhsp()));
+                } else if (const AstNodeBiop* const biopp = VN_CAST(exprp, NodeBiop)) {
+                    UASSERT_OBJ(!whyp, biopp,
+                                "widthMismatch detected " << whyp << "OUT:" << dtypeStr(biopp)
+                                                          << " LHS:" << dtypeStr(biopp->lhsp())
+                                                          << " RHS:" << dtypeStr(biopp->rhsp()));
+                } else {
+                    UASSERT_OBJ(false, exprp,
+                                "widthMismatch detected " << whyp << " in an unexpected type");
+                }
+            }
+        }
+    }
 }
 
+// cppcheck-suppress unusedFunction  // Debug only
+char* AstNode::dumpTreeJsonGdb(const AstNode* nodep) {
+    if (!nodep) return strdup("{\"addr\":\"NULL\"}\n");
+    std::stringstream nodepStream;
+    nodep->dumpTreeJson(nodepStream);
+    const std::string str = nodepStream.rdbuf()->str();
+    return strdup(str.c_str());
+}
+// cppcheck-suppress unusedFunction  // Debug only
+// identity func to allow for passing already done dumps to jtree
+char* AstNode::dumpTreeJsonGdb(const char* str) { return strdup(str); }
+// cppcheck-suppress unusedFunction  // Debug only
+// allow for passing pointer literals like 0x42.. without manual cast
+char* AstNode::dumpTreeJsonGdb(intptr_t nodep) {
+    if (!nodep) return strdup("{\"addr\":\"NULL\"}\n");
+    return dumpTreeJsonGdb((const AstNode*)nodep);
+}
 // cppcheck-suppress unusedFunction  // Debug only
 void AstNode::dumpGdb(const AstNode* nodep) {  // For GDB only  // LCOV_EXCL_LINE
     if (!nodep) {
@@ -1238,7 +1280,7 @@ void AstNode::dumpPtrs(std::ostream& os) const {
         // This may cause address sanitizer failures as iterpp can be stale
         // os << "*=" << cvtToHex(*m_iterpp);
     }
-    os << std::endl;
+    os << "\n";
 }
 
 void AstNode::dumpTree(std::ostream& os, const string& indent, int maxDepth) const {
@@ -1274,12 +1316,12 @@ void AstNode::dumpTreeAndNext(std::ostream& os, const string& indent, int maxDep
     }
 }
 
-void AstNode::dumpTreeFile(const string& filename, bool append, bool doDump, bool doCheck) {
+void AstNode::dumpTreeFile(const string& filename, bool doDump) {
     // Not const function as calls checkTree
     if (doDump) {
         {  // Write log & close
             UINFO(2, "Dumping " << filename << endl);
-            const std::unique_ptr<std::ofstream> logsp{V3File::new_ofstream(filename, append)};
+            const std::unique_ptr<std::ofstream> logsp{V3File::new_ofstream(filename)};
             if (logsp->fail()) v3fatal("Can't write " << filename);
             *logsp << "Verilator Tree Dump (format 0x3900) from <e" << std::dec << editCountLast();
             *logsp << "> to <e" << std::dec << editCountGbl() << ">\n";
@@ -1291,14 +1333,6 @@ void AstNode::dumpTreeFile(const string& filename, bool append, bool doDump, boo
                 editCountSetLast();  // Next dump can indicate start from here
             }
         }
-    }
-    if (doDump && v3Global.opt.debugEmitV()) V3EmitV::debugEmitV(filename + ".v");
-    if (doCheck && (v3Global.opt.debugCheck() || ::dumpTreeLevel())) {
-        // Error check
-        checkTree();
-        // Broken isn't part of check tree because it can munge iterp's
-        // set by other steps if it is called in the middle of other operations
-        if (AstNetlist* const netp = VN_CAST(this, Netlist)) V3Broken::brokenAll(netp);
     }
 }
 
@@ -1329,10 +1363,33 @@ void AstNode::dumpTreeDot(std::ostream& os) const {
     drawChildren(os, this, m_op4p, "op4");
 }
 
-void AstNode::dumpTreeDotFile(const string& filename, bool append, bool doDump) {
+void AstNode::dumpTreeJsonFile(const string& filename, bool doDump) {
+    if (!doDump) return;
+    UINFO(2, "Dumping " << filename << endl);
+    const std::unique_ptr<std::ofstream> treejsonp{V3File::new_ofstream(filename)};
+    if (treejsonp->fail()) v3fatal("Can't write " << filename);
+    dumpTreeJson(*treejsonp);
+    *treejsonp << '\n';
+}
+
+void AstNode::dumpJsonMetaFileGdb(const char* filename) { dumpJsonMetaFile(filename); }
+void AstNode::dumpJsonMetaFile(const string& filename) {
+    UINFO(2, "Dumping " << filename << endl);
+    const std::unique_ptr<std::ofstream> treejsonp{V3File::new_ofstream(filename)};
+    if (treejsonp->fail()) v3fatalStatic("Can't write " << filename);
+    *treejsonp << '{';
+    FileLine::fileNameNumMapDumpJson(*treejsonp);
+    *treejsonp << ',';
+    v3Global.idPtrMapDumpJson(*treejsonp);
+    *treejsonp << ',';
+    v3Global.ptrNamesDumpJson(*treejsonp);
+    *treejsonp << "}\n";
+}
+
+void AstNode::dumpTreeDotFile(const string& filename, bool doDump) {
     if (doDump) {
         UINFO(2, "Dumping " << filename << endl);
-        const std::unique_ptr<std::ofstream> treedotp{V3File::new_ofstream(filename, append)};
+        const std::unique_ptr<std::ofstream> treedotp{V3File::new_ofstream(filename)};
         if (treedotp->fail()) v3fatal("Can't write " << filename);
         *treedotp << "digraph vTree{\n";
         *treedotp << "\tgraph\t[label=\"" << filename + ".dot"
@@ -1448,17 +1505,20 @@ AstNodeDType* AstNode::findBitRangeDType(const VNumRange& range, int widthMin,
 AstBasicDType* AstNode::findInsertSameDType(AstBasicDType* nodep) {
     return v3Global.rootp()->typeTablep()->findInsertSameDType(nodep);
 }
+AstNodeDType* AstNode::findConstraintRefDType() const {
+    return v3Global.rootp()->typeTablep()->findConstraintRefDType(fileline());
+}
 AstNodeDType* AstNode::findEmptyQueueDType() const {
     return v3Global.rootp()->typeTablep()->findEmptyQueueDType(fileline());
 }
 AstNodeDType* AstNode::findQueueIndexDType() const {
     return v3Global.rootp()->typeTablep()->findQueueIndexDType(fileline());
 }
-AstNodeDType* AstNode::findVoidDType() const {
-    return v3Global.rootp()->typeTablep()->findVoidDType(fileline());
-}
 AstNodeDType* AstNode::findStreamDType() const {
     return v3Global.rootp()->typeTablep()->findStreamDType(fileline());
+}
+AstNodeDType* AstNode::findVoidDType() const {
+    return v3Global.rootp()->typeTablep()->findVoidDType(fileline());
 }
 
 static const AstNodeDType* computeCastableBase(const AstNodeDType* nodep) {
@@ -1503,8 +1563,7 @@ static VCastable computeCastableImp(const AstNodeDType* toDtp, const AstNodeDTyp
             return VCastable::ENUM_IMPLICIT;
         if (fromNumericable) return VCastable::ENUM_EXPLICIT;
     } else if (VN_IS(toDtp, ClassRefDType) && VN_IS(fromConstp, Const)) {
-        if (VN_IS(fromConstp, Const) && VN_AS(fromConstp, Const)->num().isNull())
-            return VCastable::COMPATIBLE;
+        if (fromConstp->isNull()) return VCastable::COMPATIBLE;
     } else if (VN_IS(toDtp, ClassRefDType) && VN_IS(fromDtp, ClassRefDType)) {
         const auto toClassp = VN_AS(toDtp, ClassRefDType)->classp();
         const auto fromClassp = VN_AS(fromDtp, ClassRefDType)->classp();
@@ -1526,30 +1585,30 @@ VCastable AstNode::computeCastable(const AstNodeDType* toDtp, const AstNodeDType
     const auto castable = computeCastableImp(toDtp, fromDtp, fromConstp);
     UINFO(9, "  castable=" << castable << "  for " << toDtp << endl);
     UINFO(9, "     =?= " << fromDtp << endl);
-    UINFO(9, "     const= " << fromConstp << endl);
+    if (fromConstp) UINFO(9, "     const= " << fromConstp << endl);
     return castable;
 }
 
-AstNodeDType* AstNode::getCommonClassTypep(AstNode* nodep1, AstNode* nodep2) {
-    // Return the class type that both nodep1 and nodep2 are castable to.
+AstNodeDType* AstNode::getCommonClassTypep(AstNode* node1p, AstNode* node2p) {
+    // Return the class type that both node1p and node2p are castable to.
     // If both are null, return the type of null constant.
     // If one is a class and one is null, return AstClassRefDType that points to that class.
     // If no common class type exists, return nullptr.
 
     // First handle cases with null values and when one class is a super class of the other.
-    if (VN_IS(nodep1, Const)) std::swap(nodep1, nodep2);
+    if (VN_IS(node1p, Const)) std::swap(node1p, node2p);
     {
-        const VCastable castable = computeCastable(nodep1->dtypep(), nodep2->dtypep(), nodep2);
+        const VCastable castable = computeCastable(node1p->dtypep(), node2p->dtypep(), node2p);
         if (castable == VCastable::SAMEISH || castable == VCastable::COMPATIBLE) {
-            return nodep1->dtypep();
+            return node1p->dtypep();
         } else if (castable == VCastable::DYNAMIC_CLASS) {
-            return nodep2->dtypep();
+            return node2p->dtypep();
         }
     }
 
-    AstClassRefDType* classDtypep1 = VN_CAST(nodep1->dtypep(), ClassRefDType);
+    AstClassRefDType* classDtypep1 = VN_CAST(node1p->dtypep(), ClassRefDType);
     while (classDtypep1) {
-        const VCastable castable = computeCastable(classDtypep1, nodep2->dtypep(), nodep2);
+        const VCastable castable = computeCastable(classDtypep1, node2p->dtypep(), node2p);
         if (castable == VCastable::COMPATIBLE) return classDtypep1;
         AstClassExtends* const extendsp = classDtypep1->classp()->extendsp();
         classDtypep1 = extendsp ? VN_AS(extendsp->dtypep(), ClassRefDType) : nullptr;

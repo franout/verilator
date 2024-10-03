@@ -224,7 +224,7 @@ Scheduling
 ----------
 
 Verilator implements the Active and NBA regions of the SystemVerilog scheduling
-model as described in IEEE 1800-2017 chapter 4, and in particular sections
+model as described in IEEE 1800-2023 chapter 4, and in particular sections
 4.5 and Figure 4.1. The static (Verilation time) scheduling of SystemVerilog
 processes is performed by code in the ``V3Sched`` namespace. The single
 entry point to the scheduling algorithm is ``V3Sched::schedule``. Some
@@ -312,7 +312,7 @@ Scheduling of clocked and combinational logic
 For performance, clocked and combinational logic needs to be ordered.
 Conceptually this minimizes the iterations through the evaluation loop
 presented in the reference algorithm in the SystemVerilog standard (IEEE
-1800-2017 section 4.5), by evaluating logic constructs in data-flow order.
+1800-2023 section 4.5), by evaluating logic constructs in data-flow order.
 Without going into a lot of detail here, accept that well thought out ordering
 is crucial to good simulation performance, and also enables further
 optimizations later on.
@@ -407,7 +407,7 @@ triggered due to a combinational signal change from the previous evaluation
 pass, and a combinational loop settling due to hybrid logic, if the clocked
 logic reads the not yet settled combinationally driven signal. Such a race
 is indeed possible, but our evaluation is consistent with the SystemVerilog
-scheduling semantics (IEEE 1800-2017 chapter 4), and therefore any program
+scheduling semantics (IEEE 1800-2023 chapter 4), and therefore any program
 that exhibits such a race has non-deterministic behavior according to the
 SystemVerilog semantics, so we accept this.
 
@@ -1031,15 +1031,100 @@ the evaluation process records a bitmask of variables that might have
 changed; if clear, checking those signals for changes may be skipped.
 
 
+Constrained randomization
+-------------------------
+
+Because general constrained randomization is a co-NP-hard problem, not all
+cases are implemented in Verilator, and an external specialized SMT solver is
+used for any non-obvious ones.
+
+The ``randomize()`` method spawns an SMT solver in a sub-process. Then the
+solver gets a setup query, then the definition of variables, then all the
+constraints (SMT assertions) about the variables. Since the solver has no
+information about the class' PRNG state, if the problem is satisfiable,
+the solution space is further constrained by adding extra random constraints,
+and querying the values satisfying the problem statement.
+The constraint is currently constructed as fixing a simple xor of randomly
+chosen bits of the variables being randomized.
+
+The runtime classes used for handling the randomization are  defined in
+``verilated_random.h`` and ``verilated_random.cpp``.
+
+
+``VlSubprocess``
+~~~~~~~~~~~~~~~~
+
+Subprocess handle, responsible for keeping track of the resources like child
+PID, read and write file descriptors, and presenting them as a C++ iostream.
+
+
+``VlRandomizer``
+~~~~~~~~~~~~~~~~
+
+Randomizer class, responsible for keeping track of variables and constraints,
+and communicating with the solver subprocess.
+
+The solver gets the constraints in `SMT-LIB2
+<https://smtlib.cs.uiowa.edu/>`__ textual format in the following syntax:
+
+::
+
+    (set-info :smt-lib-version 2.0)
+    (set-option :produce-models true)
+    (set-logic QF_BV)
+
+    (declare-fun v () (_ BitVec 16))
+    (declare-fun w () (_ BitVec 64))
+    (declare-fun x () (_ BitVec 48))
+    (declare-fun z () (_ BitVec 24))
+    (declare-fun t () (_ BitVec 23))
+    (assert (or (= v #x0003) (= v #x0008)))
+    (assert (= w #x0000000000000009))
+    (assert (or (or (= x #x000000000001) (= x #x000000000002)) (or (= x #x000000000004) (= x #x000000000009))))
+    (assert (bvult ((_ zero_extend 8) z) #x00000015))
+    (assert (bvugt ((_ zero_extend 8) z) #x0000000d))
+
+    (check-sat)
+
+The solver responds with either ``sat`` or ``unsat``. Then the initial solution
+is queried with:
+
+::
+
+    (get-value (v w x z t ))
+
+The solver then responds with e.g.:
+
+::
+
+    ((v #x0008)
+     (w #x0000000000000005)
+     (x #x000000000002)
+     (z #x000010)
+     (t #b00000000000000000000000))
+
+And then a follow-up query (or a series thereof) is asked, and the solver gets
+reset, so that it can be reused by subsequent randomization attempts:
+
+::
+
+    (assert (= (bvxor (bvxor <...> (bvxor ((_ extract 21 21) z) ((_ extract 39 39) x)) ((_ extract 5 5) w)) <...> ((_ extract 10 10) w)) #b0))
+    (check-sat)
+    (get-value)
+    ...
+    (reset)
+
+
+
 Coding Conventions
 ==================
 
 
-Compiler Version and C++11
+Compiler Version and C++14
 --------------------------
 
-Verilator requires C11. Verilator does not require any newer versions, but
-is maintained to build successfully with C14/C17/C20.
+Verilator requires C14. Verilator does not require any newer versions, but
+is maintained to build successfully with C17/C20.
 
 
 Indentation and Naming Style
@@ -1387,9 +1472,6 @@ For all tests to pass, you must install the following packages:
 
 -  SystemC to compile the SystemC outputs, see http://systemc.org
 
--  Parallel::Forker from CPAN to run tests in parallel; you can install
-   this with e.g. "sudo cpan install Parallel::Forker".
-
 -  vcddiff to find differences in VCD outputs. See the readme at
    https://github.com/veripool/vcddiff
 
@@ -1399,7 +1481,7 @@ For all tests to pass, you must install the following packages:
 Controlling the Test Driver
 ---------------------------
 
-The test driver script `driver.pl` runs tests; see the `Test Driver`
+The test driver script `driver.py` runs tests; see the `Test Driver`
 section.  The individual test drivers are written in Perl; see `Test
 Language`.
 
@@ -1412,7 +1494,7 @@ A specific regression test can be executed manually. To start the
 
 ::
 
-   test_regress/t/t_EXAMPLE.pl
+   test_regress/t/t_EXAMPLE.py
 
 
 Regression Testing for Developers
@@ -1431,13 +1513,6 @@ Developers will also want to call ./configure with two extra flags:
    in the ``test_regress`` directory when using *make test*'. This is
    disabled by default, as SystemC installation problems would otherwise
    falsely indicate a Verilator problem.
-
-When enabling the long tests, some additional Perl modules are needed,
-which you can install using cpan.
-
-::
-
-   cpan install Parallel::Forker
 
 There are some traps to avoid when running regression tests
 
@@ -1696,6 +1771,84 @@ Similarly, the ``NETLIST`` has a list of modules referred to by its
 ``op1p()`` pointer.
 
 
+.tree.json Output
+-----------------
+
+``.tree.json``` is an alternative dump format to ``.tree`` that is meant for
+programmatic processing (e.g. with `astsee <https://github.com/antmicro/astsee>`_).
+To enable this dump format, use :vlopt:`--dump-tree-json` or :vlopt:`--json-only`.
+
+Structure:
+::
+
+  {
+    /* Attributes that are common to all types of nodes */
+    "type": "VAR",
+    "name": "cyc",
+    /* By default addresses and filenames use short/stable ids rather than real value */
+    "addr": "(H)",
+    "loc": "a,25:12,26:15", /* "fileid,firstLine:firstCol,lastLine:endCol" (endCol is right exclusive) */
+    "editNum": 602,
+    /* Fields that are specific to AstVar nodes:  */
+    "origName": "cyc",
+    "isSc": false,
+    "ioDirection": "NONE",
+    "isConst": false,
+    "isPullup": false,
+    "isPulldown": false,
+    "isUsedClock": false,
+    "isSigPublic": false,
+    "isLatched": false,
+    "isUsedLoopIdx": false,
+    "noReset": false,
+    "attrIsolateAssign": false,
+    "attrFileDescr": false,
+    "isDpiOpenArray": false,
+    "isFuncReturn": false,
+    "isFuncLocal": false,
+    "attrClocker": "UNKNOWN",
+    "lifetime": "NONE",
+    "varType": "VAR",
+    /* Lists of child nodes (which use similar structure as their parent): */
+    "childDTypep": [ /* ... */ ],
+    "delayp": [ /* ... */ ],
+    "valuep": [ /* ... */ ],
+    "attrsp": [ /* ... */ ]
+  }
+
+.tree.meta.json Output
+----------------
+.tree.meta.json contains metadata that is common across the whole AST tree
+(in case of --dump-tree-json, multiple trees share one meta file).
+
+Besides de-duplication of data shared between multiple stages, .meta.json enables offloading
+unstable data (that can vary from machine-to-machine or run-to-run) from main .tree.json.
+This offloading allows, for example, to use byte-to-byte comparisons of AST dumps in tests.
+
+::
+
+  {"files": {
+    /* Map id to filename, and other metadata */
+    "d": {"filename":"/home/ant/tmp/verilator/include/verilated_std.sv", "realpath":"/home/ant/tmp/verilator/include/verilated_std.sv", "language":"1800-2023"},
+    "a": {"filename":"<built-in>", "realpath":"<built-in>", "language":"1800-2023"},
+    "b": {"filename":"<command-line>", "realpath":"<command-line>", "language":"1800-2023"},
+    "c": {"filename":"input.vc", "realpath":"/home/ant/tmp/verilator/test_regress/input.vc", "language":"1800-2023"},
+    "e": {"filename":"t/t_EXAMPLE.v", "realpath":"/home/ant/tmp/verilator/test_regress/t/t_EXAMPLE.v", "language":"1800-2023"}
+   },"pointers": {
+    /* Map id to real address */
+    "(AG)": "0x562997289180",
+    "(YF)": "0x5629971c50b0",
+    "(WF)": "0x5629971e7ae0",
+    /* ... /*
+   },"ptrFieldNames": [
+    /* List of fields that are used for storing pointers */
+    "aboveScopep",
+    "voidp",
+    "addr",
+    /* ... */
+ ]}
+
+
 .tree.dot Output
 ----------------
 
@@ -1708,7 +1861,7 @@ represent the pointers (``op1p``, ``op2p``, etc) between the nodes.
 Debugging with GDB
 ------------------
 
-The `driver.pl` script accepts ``--debug --gdb`` to start
+The `driver.py` script accepts ``--debug --gdb`` to start
 Verilator under gdb and break when an error is hit, or the program is about
 to exit. You can also use ``--debug --gdbbt`` to just backtrace and then
 exit gdb. To debug the Verilated executable, use ``--gdbsim``.
@@ -1719,7 +1872,7 @@ can use ``--debug`` and look at the underlying invocation of
 
 ::
 
-   t/t_alw_dly.pl --debug
+   t/t_alw_dly.py --debug
 
 shows it invokes the command:
 
@@ -1768,6 +1921,20 @@ To print a node:
    pnt nodep
    # or: call dumpTreeGdb(nodep)  # aliased to "pnt" in src/.gdbinit
 
+``src/.gdbinit`` and ``src/.gdbinit.py`` define handy utilities for working with
+JSON AST dumps. For example:
+
+* ``jstash nodep`` - Perform a JSON AST dump and save it into GDB value history (e.g. ``$1``)
+* ``jtree nodep`` - Perform a JSON AST dump and pretty print it using ``astsee_verilator``.
+* ``jtree $1`` - Pretty print a dump that was previously saved by ``jstash``.
+* ``jtree nodep -d '.file, .timeunit'`` - Perform a JSON AST dump, filter out some fields and pretty print it.
+* ``jtree 0x55555613dca0`` - Pretty print using address literal (rather than actual pointer).
+* ``jtree $1 nodep`` - Diff ``nodep`` against an older dump.
+
+A detailed description of ``jstash`` and ``jtree`` can be displayed using ``gdb``'s ``help`` command.
+
+These commands require `astsee <https://github.com/antmicro/astsee>`_ to be installed.
+
 When GDB halts, it is useful to understand that the backtrace will commonly
 show the iterator functions between each invocation of ``visit`` in the
 backtrace. You will typically see a frame sequence something like:
@@ -1802,7 +1969,7 @@ Generally, what would you do to add a new feature?
    Follow the convention described above about the AstNode type hierarchy.
    Ordering of definitions is enforced by ``astgen``.
 
-5. Now you can run ``test_regress/t/t_<newtestcase>.pl --debug`` and it'll
+5. Now you can run ``test_regress/t/t_<newtestcase>.py --debug`` and it'll
    probably fail, but you'll see a
    ``test_regress/obj_dir/t_<newtestcase>/*.tree`` file which you can examine
    to see if the parsing worked. See also the sections above on debugging.
@@ -1829,21 +1996,21 @@ Verilator ideally would support all of IEEE, and has the goal to get close
 to full support. However the following IEEE sections and features are not
 anticipated to be ever implemented for the reasons indicated.
 
-IEEE 1800-2017 3.3 modules within modules
+IEEE 1800-2023 3.3 modules within modules
     Little/no tool support, and arguably not a good practice.
-IEEE 1800-2017 6.12 "shortreal"
+IEEE 1800-2023 6.12 "shortreal"
     Little/no tool support, and easily promoted to real.
-IEEE 1800-2017 11.11 Min, typ, max
+IEEE 1800-2023 11.11 Min, typ, max
     No SDF support, so will always use typical.
-IEEE 1800-2017 20.16 Stochastic analysis
+IEEE 1800-2023 20.16 Stochastic analysis
     Little industry use.
-IEEE 1800-2017 20.17 PLA modeling
+IEEE 1800-2023 20.17 PLA modeling
     Little industry use and outdated technology.
-IEEE 1800-2017 31 Timing checks
+IEEE 1800-2023 31 Timing checks
     No longer relevant with static timing analysis tools.
-IEEE 1800-2017 32 SDF annotation
+IEEE 1800-2023 32 SDF annotation
     No longer relevant with static timing analysis tools.
-IEEE 1800-2017 33 Config
+IEEE 1800-2023 33 Config
     Little industry use.
 
 
@@ -1851,7 +2018,7 @@ IEEE 1800-2017 33 Config
 Test Driver
 ===========
 
-This section documents the test driver script, `driver.pl`.  driver.pl
+This section documents the test driver script, `driver.py`.  driver.py
 invokes Verilator or another simulator on each test file.  For test file
 contents description see `Test Language`.
 
@@ -1863,7 +2030,7 @@ the regression tests with OBJCACHE enabled and in parallel on a machine
 with many cores.  See the -j option and OBJCACHE environment variable.
 
 
-driver.pl Non-Scenario Arguments
+driver.py Non-Scenario Arguments
 --------------------------------
 
 --benchmark [<cycles>]
@@ -1883,6 +2050,10 @@ driver.pl Non-Scenario Arguments
   Same as ``verilator --dump-tree``: Enable Verilator writing .tree debug
   files with dumping level 3, which dumps the standard critical stages.
   For details on the format see `.tree Output`.
+
+--fail-max <numtests>
+  Set the number of failing tests, after which the driver will stop running
+  additional tests.  Defaults to 20, 0 disables.
 
 --gdb
   Same as ``verilator --gdb``: Run Verilator under the debugger.
@@ -1929,13 +2100,16 @@ driver.pl Non-Scenario Arguments
   memory leaks.
 
 --site
-  Run site specific tests also.
+  Run site-specific tests also.
 
 --stop
   Stop on the first error.
 
 --trace
-  Set the simulator specific flags to request waveform tracing.
+  Set the simulator-specific flags to request waveform tracing.
+
+--valgrind
+  Same as ``verilator --valgrind``: Run Verilator under `Valgrind <https://valgrind.org/>`_.
 
 --verbose
   Compile and run the test in verbose mode. This means ``TEST_VERBOSE``
@@ -1945,7 +2119,7 @@ driver.pl Non-Scenario Arguments
   For tests using the standard C++ wrapper, enable runtime debug mode.
 
 
-driver.pl Scenario Arguments
+driver.py Scenario Arguments
 ----------------------------
 
 The following options control which simulator is used, and which tests are
@@ -1980,11 +2154,14 @@ simultaneously.
 --vltmt
   Run Verilator tests in multithreaded mode.
 
+--xrun
+  Run Cadence Xcelium simulator tests.
+
 --xsim
   Run Xilinx XSim simulator tests.
 
 
-driver.pl Environment
+driver.py Environment
 ---------------------
 
 HARNESS_UPDATE_GOLDEN
@@ -2023,6 +2200,10 @@ VERILATOR_ROOT
   Standard path to Verilator distribution root; see primary Verilator
   documentation.
 
+VERILATOR_SOLVER
+  SMT solver command for constrained randomization; see primary Verilator
+  documentation.
+
 VERILATOR_TESTS_SITE
   Used with ``--site``, a colon-separated list of directories with tests to
   be added to testlist.
@@ -2040,30 +2221,30 @@ VERILATOR_XVLOG
 Test Language
 =============
 
-This section describes the format of the ``test_regress/t/*.pl`` test
-language files, executed by `driver.pl`.
+This section describes the format of the ``test_regress/t/*.py`` test
+language files, executed by `driver.py`.
 
 Test Language Summary
 ---------------------
 
 For convenience, a summary of the most commonly used features is provided
 here, with a reference in a later section. All test files typically have a
-call to the ``lint`` or ``compile`` subroutine to compile the test. For
-run-time tests, this is followed by a call to the ``execute``
-subroutine. Both of these functions can optionally be provided with
-arguments specifying additional options.
+call to the ``test.lint`` or ``test.compile`` methods to compile the
+test. For run-time tests, this is followed by a call to the
+``test.execute`` method. Both of these functions can optionally be provided
+with arguments specifying additional options.
 
-If those complete, the script calls ``ok`` to increment the count of
-successful tests and then returns 1 as its result.
+If those complete, the script calls ``test.passes`` to increment the count
+of successful tests.
 
-The driver.pl script assumes by default that the source Verilog file name
+The driver.py script assumes by default that the source Verilog file name
 matches the test script name. So a test whose driver is
-``t/t_mytest.pl`` will expect a Verilog source file ``t/t_mytest.v``.
+``t/t_mytest.py`` will expect a Verilog source file ``t/t_mytest.v``.
 This can be changed using the ``top_filename`` subroutine, for example
 
 ::
 
-   top_filename("t/t_myothertest.v");
+   test.top_filename = "t/t_myothertest.v"
 
 By default, all tests will run with major simulators (Icarus Verilog, NC,
 VCS, ModelSim, etc.) as well as Verilator, to allow results to be
@@ -2072,26 +2253,25 @@ can use the following:
 
 ::
 
-   scenarios(vlt => 1);
+   test.scenarios('vlt')
 
-Of the many options that can be set through arguments to ``compiler`` and
-``execute``, the following are particularly useful:
+Of the many options that can be set through arguments to ``test.compiler``
+and ``test.execute``, the following are particularly useful:
 
 ``verilator_flags2``
   A list of flags to be passed to verilator when compiling.
 
 ``fails``
-  Set to 1 to indicate that the compilation or execution is intended to fail.
+  Set true to indicate that the compilation or execution is intended to fail.
 
 For example, the following would specify that compilation requires two
 defines and is expected to fail.
 
 ::
 
-   compile(
+   test.compile(
       verilator_flags2 => ["-DSMALL_CLOCK -DGATED_COMMENT"],
-      fails => 1,
-      );
+      fails = True)
 
 Hints On Writing Tests
 ----------------------
@@ -2104,10 +2284,10 @@ same name as the test, but with .cpp as suffix
 
 ::
 
-   compile(
-      make_top_shell   => 0,
-      make_main        => 0,
-      verilator_flags2 => ["--exe $Self->{t_dir}/$Self->{name}.cpp"], );
+   test.compile(
+      make_top_shell=False,
+      make_main=False,
+      verilator_flags2=["--exe", test.t_dir + "/" + test.name + ".cpp"])
 
 Tests should be self-checking, rather than producing lots of output. If a
 test succeeds it should print ``*-* All Finished *-*`` to standard output
@@ -2147,9 +2327,8 @@ compile time, it is the only option. For example:
 ::
 
    compile(
-      fails => 1,
-      expect_filename => $Self->{golden_filename},
-      );
+      fails=True,
+      expect_filename=test.golden_filename)
 
 Note ``expect_filename`` strips some debugging information from the logfile
 when comparing.
@@ -2158,9 +2337,9 @@ when comparing.
 Test Language Compile/Lint/Run Arguments
 ----------------------------------------
 
-This section describes common arguments to ``compile()``, ``lint()``, and
-``run()``.  The full list of arguments can be found by looking at the
-``driver.pl`` source code.
+This section describes common arguments to ``test.compile``, ``test.lint``,
+and ``test.run``.  The full list of arguments can be found by looking at
+the ``driver.py`` source code.
 
 all_run_flags
   A list of flags to be passed when running the simulator (Verilated model
@@ -2170,11 +2349,6 @@ check_finished
   True to indicate successful completion of the test is indicated by the
   string ``*-* All Finished *-*`` being printed on standard output. This is
   the normal way for successful tests to finish.
-
-expect
-  A quoted list of strings or regular expression to be matched in the
-  output. See `Hints On Writing Tests` for more detail on how this argument
-  should be used.
 
 fails
   True to indicate this step is expected to fail.  Tests that are expected
@@ -2237,7 +2411,7 @@ xsim_flags / xsim_flags2 / xsim_run_flags
 Distribution
 ============
 
-Copyright 2008-2023 by Wilson Snyder. Verilator is free software; you can
+Copyright 2008-2024 by Wilson Snyder. Verilator is free software; you can
 redistribute it and/or modify it under the terms of either the GNU Lesser
 General Public License Version 3 or the Perl Artistic License Version 2.0.
 

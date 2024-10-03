@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2001-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2001-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -29,6 +29,7 @@
 // GTKWave configuration
 #define HAVE_LIBPTHREAD
 #define FST_WRITER_PARALLEL
+#define LZ4_DISABLE_DEPRECATE_WARNINGS
 
 // Include the GTKWave implementation directly
 #define FST_CONFIG_INCLUDE "fst_config.h"
@@ -126,6 +127,7 @@ void VerilatedFst::declDTypeEnum(int dtypenum, const char* name, uint32_t elemen
 // TODO: should return std::optional<fstScopeType>, but I can't have C++17
 static std::pair<bool, fstScopeType> toFstScopeType(VerilatedTracePrefixType type) {
     switch (type) {
+    case VerilatedTracePrefixType::ROOTIO_MODULE: return {true, FST_ST_VCD_MODULE};
     case VerilatedTracePrefixType::SCOPE_MODULE: return {true, FST_ST_VCD_MODULE};
     case VerilatedTracePrefixType::SCOPE_INTERFACE: return {true, FST_ST_VCD_INTERFACE};
     case VerilatedTracePrefixType::STRUCT_PACKED:
@@ -136,7 +138,20 @@ static std::pair<bool, fstScopeType> toFstScopeType(VerilatedTracePrefixType typ
 }
 
 void VerilatedFst::pushPrefix(const std::string& name, VerilatedTracePrefixType type) {
-    const std::string newPrefix = m_prefixStack.back().first + name;
+    assert(!m_prefixStack.empty());  // Constructor makes an empty entry
+    std::string pname = name;
+    // An empty name means this is the root of a model created with name()=="".  The
+    // tools get upset if we try to pass this as empty, so we put the signals under a
+    // new scope, but the signals further down will be peers, not children (as usual
+    // for name()!="")
+    // Terminate earlier $root?
+    if (m_prefixStack.back().second == VerilatedTracePrefixType::ROOTIO_MODULE) popPrefix();
+    if (pname.empty()) {  // Start new temporary root
+        pname = "$rootio";  // VCD names are not backslash escaped
+        m_prefixStack.emplace_back("", VerilatedTracePrefixType::ROOTIO_WRAPPER);
+        type = VerilatedTracePrefixType::ROOTIO_MODULE;
+    }
+    const std::string newPrefix = m_prefixStack.back().first + pname;
     const auto pair = toFstScopeType(type);
     const bool properScope = pair.first;
     const fstScopeType scopeType = pair.second;
@@ -148,10 +163,11 @@ void VerilatedFst::pushPrefix(const std::string& name, VerilatedTracePrefixType 
 }
 
 void VerilatedFst::popPrefix() {
+    assert(!m_prefixStack.empty());
     const bool properScope = toFstScopeType(m_prefixStack.back().second).first;
     if (properScope) fstWriterSetUpscope(m_fst);
     m_prefixStack.pop_back();
-    assert(!m_prefixStack.empty());
+    assert(!m_prefixStack.empty());  // Always one left, the constructor's initial one
 }
 
 void VerilatedFst::declare(uint32_t code, const char* name, int dtypenum,
@@ -174,7 +190,7 @@ void VerilatedFst::declare(uint32_t code, const char* name, int dtypenum,
 
     if (dtypenum > 0) fstWriterEmitEnumTableRef(m_fst, m_local2fstdtype[dtypenum]);
 
-    fstVarDir varDir;
+    fstVarDir varDir = FST_VD_IMPLICIT;
     switch (direction) {
     case VerilatedTraceSigDirection::INOUT: varDir = FST_VD_INOUT; break;
     case VerilatedTraceSigDirection::OUTPUT: varDir = FST_VD_OUTPUT; break;
@@ -293,7 +309,7 @@ void VerilatedFst::configure(const VerilatedTraceConfig& config) {
 // so always inline them.
 
 VL_ATTR_ALWINLINE
-void VerilatedFstBuffer::emitEvent(uint32_t code, const VlEventBase* newval) {
+void VerilatedFstBuffer::emitEvent(uint32_t code) {
     VL_DEBUG_IFDEF(assert(m_symbolp[code]););
     fstWriterEmitValueChange(m_fst, m_symbolp[code], "1");
 }

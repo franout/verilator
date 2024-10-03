@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -22,7 +22,6 @@
 
 #include "V3Error.h"
 #include "V3Global.h"
-#include "V3ThreadSafety.h"
 
 class AstNetlist;
 class VInFilter;
@@ -32,7 +31,6 @@ class V3ParseSym;
 //============================================================================
 
 class V3Parse final {
-private:
     V3ParseImp* m_impp;
 
     // CONSTRUCTORS
@@ -50,6 +48,9 @@ public:
 
     // Push preprocessed text to the lexer
     static void ppPushText(V3ParseImp* impp, const string& text) VL_MT_DISABLED;
+
+    // Suggest PLI functions for spell check
+    static void candidatePli(VSpellCheck* spellerp) VL_MT_DISABLED;
 };
 
 #endif  // Guard

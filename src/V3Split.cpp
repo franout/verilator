@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -146,7 +146,7 @@ public:
     SplitVarPostVertex(V3Graph* graphp, AstNode* nodep)
         : SplitNodeVertex{graphp, nodep} {}
     ~SplitVarPostVertex() override = default;
-    string name() const override { return string{"POST "} + SplitNodeVertex::name(); }
+    string name() const override { return "POST "s + SplitNodeVertex::name(); }
     string dotColor() const override { return "CadetBlue"; }
 };
 
@@ -241,7 +241,6 @@ public:
 // Split class functions
 
 class SplitReorderBaseVisitor VL_NOT_FINAL : public VNVisitor {
-private:
     // NODE STATE
     // AstVarScope::user1p      -> Var SplitNodeVertex* for usage var, 0=not set yet
     // AstVarScope::user2p      -> Var SplitNodeVertex* for delayed assignment var, 0=not set yet
@@ -303,7 +302,7 @@ private:
     }
     void scoreboardPopStmt() {
         // UINFO(9, "    pop" << endl);
-        if (m_stmtStackps.empty()) v3fatalSrc("Stack underflow");
+        UASSERT(!m_stmtStackps.empty(), "Stack underflow");
         m_stmtStackps.pop_back();
     }
 
@@ -318,17 +317,16 @@ protected:
     }
 
     void pruneDepsOnInputs() {
-        for (V3GraphVertex* vertexp = m_graph.verticesBeginp(); vertexp;
-             vertexp = vertexp->verticesNextp()) {
-            if (!vertexp->outBeginp() && vertexp->is<SplitVarStdVertex>()) {
+        for (V3GraphVertex& vertex : m_graph.vertices()) {
+            if (vertex.outEmpty() && vertex.is<SplitVarStdVertex>()) {
                 if (debug() >= 9) {
-                    const SplitVarStdVertex* const stdp = static_cast<SplitVarStdVertex*>(vertexp);
-                    UINFO(0, "Will prune deps on var " << stdp->nodep() << endl);
-                    stdp->nodep()->dumpTree("-  ");
+                    const SplitVarStdVertex& sVtx = static_cast<SplitVarStdVertex&>(vertex);
+                    UINFO(0, "Will prune deps on var " << sVtx.nodep() << endl);
+                    sVtx.nodep()->dumpTree("-  ");
                 }
-                for (V3GraphEdge* edgep = vertexp->inBeginp(); edgep; edgep = edgep->inNextp()) {
-                    SplitEdge* const oedgep = static_cast<SplitEdge*>(edgep);
-                    oedgep->setIgnoreThisStep();
+                for (V3GraphEdge& edge : vertex.inEdges()) {
+                    SplitEdge& oedge = static_cast<SplitEdge&>(edge);
+                    oedge.setIgnoreThisStep();
                 }
             }
         }
@@ -476,19 +474,16 @@ protected:
 
         // For reordering this single block only, mark all logic
         // vertexes not involved with this step as unimportant
-        for (V3GraphVertex* vertexp = m_graph.verticesBeginp(); vertexp;
-             vertexp = vertexp->verticesNextp()) {
-            if (!vertexp->user()) {
-                if (const SplitLogicVertex* const vvertexp = vertexp->cast<SplitLogicVertex>()) {
-                    for (V3GraphEdge* edgep = vertexp->inBeginp(); edgep;
-                         edgep = edgep->inNextp()) {
-                        SplitEdge* const oedgep = static_cast<SplitEdge*>(edgep);
-                        oedgep->setIgnoreThisStep();
+        for (V3GraphVertex& vertex : m_graph.vertices()) {
+            if (!vertex.user()) {
+                if (vertex.is<SplitLogicVertex>()) {
+                    for (V3GraphEdge& edge : vertex.inEdges()) {
+                        SplitEdge& oedge = static_cast<SplitEdge&>(edge);
+                        oedge.setIgnoreThisStep();
                     }
-                    for (V3GraphEdge* edgep = vertexp->outBeginp(); edgep;
-                         edgep = edgep->outNextp()) {
-                        SplitEdge* const oedgep = static_cast<SplitEdge*>(edgep);
-                        oedgep->setIgnoreThisStep();
+                    for (V3GraphEdge& edge : vertex.outEdges()) {
+                        SplitEdge& oedge = static_cast<SplitEdge&>(edge);
+                        oedge.setIgnoreThisStep();
                     }
                 }
             }
@@ -824,7 +819,7 @@ class RemovePlaceholdersVisitor final : public VNVisitor {
                 }
             }
             if (emptyOrCommentOnly) {
-                pushDeletep(nodep->unlinkFrBack());
+                VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
                 ++m_emptyAlways;
             }
         }
@@ -845,7 +840,6 @@ public:
 };
 
 class SplitVisitor final : public SplitReorderBaseVisitor {
-private:
     // Keys are original always blocks pending delete,
     // values are newly split always blocks pending insertion
     // at the same position as the originals:
@@ -906,18 +900,17 @@ protected:
         // For any 'if' node whose deps have all been pruned
         // (meaning, its conditional expression only looks at primary
         // inputs) prune all edges that depend on the 'if'.
-        for (V3GraphVertex* vertexp = m_graph.verticesBeginp(); vertexp;
-             vertexp = vertexp->verticesNextp()) {
-            const SplitLogicVertex* const logicp = vertexp->cast<const SplitLogicVertex>();
+        for (V3GraphVertex& vertex : m_graph.vertices()) {
+            SplitLogicVertex* const logicp = vertex.cast<SplitLogicVertex>();
             if (!logicp) continue;
 
             const AstNodeIf* const ifNodep = VN_CAST(logicp->nodep(), NodeIf);
             if (!ifNodep) continue;
 
             bool pruneMe = true;
-            for (V3GraphEdge* edgep = logicp->outBeginp(); edgep; edgep = edgep->outNextp()) {
-                const SplitEdge* const oedgep = static_cast<const SplitEdge*>(edgep);
-                if (!oedgep->ignoreThisStep()) {
+            for (const V3GraphEdge& edge : logicp->outEdges()) {
+                const SplitEdge& oedge = static_cast<const SplitEdge&>(edge);
+                if (!oedge.ignoreThisStep()) {
                     // This if conditional depends on something we can't
                     // prune -- a variable generated in the current block.
                     pruneMe = false;
@@ -925,11 +918,11 @@ protected:
                     // When we can't prune dependencies on the conditional,
                     // give a hint about why...
                     if (debug() >= 9) {
-                        V3GraphVertex* vxp = oedgep->top();
+                        V3GraphVertex* vxp = oedge.top();
                         const SplitNodeVertex* const nvxp
                             = static_cast<const SplitNodeVertex*>(vxp);
                         UINFO(0, "Cannot prune if-node due to edge "
-                                     << oedgep << " pointing to node " << nvxp->nodep() << endl);
+                                     << &oedge << " pointing to node " << nvxp->nodep() << endl);
                         nvxp->nodep()->dumpTree("-  ");
                     }
 
@@ -940,9 +933,9 @@ protected:
             if (!pruneMe) continue;
 
             // This if can be split; prune dependencies on it.
-            for (V3GraphEdge* edgep = logicp->inBeginp(); edgep; edgep = edgep->inNextp()) {
-                SplitEdge* const oedgep = static_cast<SplitEdge*>(edgep);
-                oedgep->setIgnoreThisStep();
+            for (V3GraphEdge& edge : logicp->inEdges()) {
+                SplitEdge& oedge = static_cast<SplitEdge&>(edge);
+                oedge.setIgnoreThisStep();
             }
         }
 
@@ -990,9 +983,12 @@ protected:
     }
     void visit(AstNodeIf* nodep) override {
         UINFO(4, "     IF " << nodep << endl);
-        m_curIfConditional = nodep;
-        iterateAndNextNull(nodep->condp());
-        m_curIfConditional = nullptr;
+        if (!nodep->condp()->isPure()) m_noReorderWhy = "Impure IF condition";
+        {
+            VL_RESTORER(m_curIfConditional);
+            m_curIfConditional = nodep;
+            iterateAndNextNull(nodep->condp());
+        }
         scanBlock(nodep->thensp());
         scanBlock(nodep->elsesp());
     }
@@ -1007,10 +1003,10 @@ private:
 void V3Split::splitReorderAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { ReorderVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("reorder", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("reorder", 0, dumpTreeEitherLevel() >= 3);
 }
 void V3Split::splitAlwaysAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { SplitVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("split", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("split", 0, dumpTreeEitherLevel() >= 3);
 }

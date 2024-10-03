@@ -17,16 +17,17 @@
 #endif
 
 int main(int argc, char** argv) {
-    if (false && argc && argv) {}
+    (void)argc;
+    (void)argv;
 
     // Construct context to hold simulation time, etc
-    VerilatedContext* contextp = new VerilatedContext;
+    const std::unique_ptr<VerilatedContext> contextp{new VerilatedContext};
     contextp->debug(0);
     contextp->randReset(2);
     contextp->commandArgs(argc, argv);
 
     // Construct the Verilated model, including the secret module
-    Vtop* top = new Vtop{contextp};
+    const std::unique_ptr<Vtop> top{new Vtop{contextp.get(), "TOP"}};
 
 #if VM_TRACE
     // When tracing, the contents of the secret module will not be seen
@@ -46,12 +47,12 @@ int main(int argc, char** argv) {
 
     // Simulate until $finish
     while (!contextp->gotFinish()) {
-        contextp->timeInc(1);
         top->clk = ~top->clk & 0x1;
         top->eval();
 #if VM_TRACE
         if (tfp) tfp->dump(contextp->time());
 #endif
+        contextp->timeInc(1);
     }
 
     // Final model cleanup
@@ -64,12 +65,6 @@ int main(int argc, char** argv) {
         tfp = nullptr;
     }
 #endif
-
-    // Destroy model
-    delete top;
-    top = nullptr;
-    delete contextp;
-    contextp = nullptr;
 
     // Return good completion status
     // Don't use exit() or destructor won't get called

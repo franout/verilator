@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -30,7 +30,6 @@
 // VlcTest - a single testrun i.e. a file containing coverage data
 
 class VlcTest final {
-private:
     // MEMBERS
     string m_name;  //< Name of the test
     double m_computrons;  //< Runtime for the test
@@ -67,7 +66,7 @@ public:
         // std::cout<<"  Testrun, Computrons,";  // Currently not loaded
         std::cout << "  Covered,     Rank,  RankPts,  Filename\n";
     }
-    void dump(bool bucketsToo) {
+    void dump(bool bucketsToo) const {
         if (testrun() || computrons() != 0.0) {  // currently unused // LCOV_EXCL_LINE
             std::cout << "  " << std::setw(8) << std::setfill('0') << testrun()  // LCOV_EXCL_LINE
                       << ",  " << std::setw(7) << std::setfill(' ')
@@ -105,7 +104,7 @@ public:
     // CONSTRUCTORS
     VlcTests() = default;
     ~VlcTests() {
-        for (auto it = begin(); it != end(); ++it) { VL_DO_CLEAR(delete *it, *it = nullptr); }
+        for (auto it = begin(); it != end(); ++it) VL_DO_CLEAR(delete *it, *it = nullptr);
     }
 
     // METHODS

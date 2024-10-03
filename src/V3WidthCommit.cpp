@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -27,6 +27,8 @@
 
 #include "V3WidthCommit.h"
 
+#include "V3MemberMap.h"
+
 VL_DEFINE_DEBUG_FUNCTIONS;
 
 //######################################################################
@@ -40,6 +42,7 @@ class WidthCommitVisitor final : public VNVisitor {
 
     // STATE
     AstNodeModule* m_modp = nullptr;
+    VMemberMap m_memberMap;  // Member names cached for fast lookup
 
 public:
     // METHODS
@@ -73,9 +76,15 @@ private:
         return nodep;
     }
     void classEncapCheck(AstNode* nodep, AstNode* defp, AstClass* defClassp) {
-        // Call on non-local class to check local/protected status and complain
+        // Check local/protected status and complain
         bool local = false;
         bool prot = false;
+        if (!defp) {
+            // rand_mode() / constraint_mode() handled in V3Randomize
+            UASSERT_OBJ(nodep->name() == "rand_mode" || nodep->name() == "constraint_mode", nodep,
+                        "Only rand_mode() and constraint_mode() can have no def");
+            return;
+        }
         if (const auto varp = VN_CAST(defp, Var)) {
             local = varp->isHideLocal();
             prot = varp->isHideProtected();
@@ -98,10 +107,10 @@ private:
                 UINFO(9, "defclass " << defClassp << endl);
                 nodep->v3warn(ENCAPSULATED, nodep->prettyNameQ()
                                                 << " is hidden as " << how
-                                                << " within this context (IEEE 1800-2017 8.18)\n"
-                                                << nodep->warnContextPrimary() << endl
+                                                << " within this context (IEEE 1800-2023 8.18)\n"
+                                                << nodep->warnContextPrimary() << "\n"
                                                 << nodep->warnOther()
-                                                << "... Location of definition" << endl
+                                                << "... Location of definition\n"
                                                 << defp->warnContextSecondary());
             }
         }
@@ -110,10 +119,23 @@ private:
     // VISITORS
     void visit(AstNodeModule* nodep) override {
         VL_RESTORER(m_modp);
-        {
-            m_modp = nodep;
-            iterateChildren(nodep);
-            editDType(nodep);
+        m_modp = nodep;
+        iterateChildren(nodep);
+        editDType(nodep);
+        if (AstClass* const classp = VN_CAST(nodep, Class)) {
+            for (AstClassExtends* extendsp = classp->extendsp(); extendsp;
+                 extendsp = extendsp->classp()->extendsp()) {
+                const AstClass* const ebasep = extendsp->classp();
+                if (ebasep->baseOverride().isFinal()) {
+                    extendsp->v3error("Class " << nodep->prettyNameQ()
+                                               << " is being extended from class marked ':final'"
+                                                  " (IEEE 1800-2023 8.20)\n"
+                                               << extendsp->warnContextPrimary() << "\n"
+                                               << ebasep->warnOther()
+                                               << "... Location of ':final' class being extended\n"
+                                               << ebasep->warnContextSecondary());
+                }
+            }
         }
     }
     void visit(AstConst* nodep) override {
@@ -171,11 +193,52 @@ private:
     void visit(AstNodeFTask* nodep) override {
         iterateChildren(nodep);
         editDType(nodep);
-        AstClass* classp = VN_CAST(m_modp, Class);
-        if (nodep->classMethod() && nodep->pureVirtual() && classp && !classp->isInterfaceClass()
-            && !classp->isVirtual()) {
-            nodep->v3error(
-                "Illegal to have 'pure virtual' in non-virtual class (IEEE 1800-2017 8.21)");
+        {
+            const AstClass* const classp = VN_CAST(m_modp, Class);
+            if (nodep->classMethod() && nodep->pureVirtual() && classp
+                && !classp->isInterfaceClass() && !classp->isVirtual()) {
+                nodep->v3error(
+                    "Illegal to have 'pure virtual' in non-virtual class (IEEE 1800-2023 8.21)");
+            }
+        }
+        bool extended = false;
+        if (const AstClass* const classp = VN_CAST(m_modp, Class)) {
+            for (AstClassExtends* extendsp = classp->extendsp(); extendsp;
+                 extendsp = extendsp->classp()->extendsp()) {
+                const AstClass* const eclassp = extendsp->classp();
+                if (AstNodeFTask* const fbasep
+                    = VN_CAST(m_memberMap.findMember(eclassp, nodep->name()), NodeFTask)) {
+                    if (fbasep != nodep) {
+                        extended = true;
+                        if (nodep->baseOverride().isInitial()) {
+                            nodep->v3error("Member "
+                                           << nodep->prettyNameQ()
+                                           << " is marked ':initial' but is being extended"
+                                              " (IEEE 1800-2023 8.20)\n"
+                                           << nodep->warnContextPrimary() << "\n"
+                                           << fbasep->warnOther()
+                                           << "... Location of declaration being extended\n"
+                                           << fbasep->warnContextSecondary());
+                        }
+                        if (fbasep->baseOverride().isFinal()) {
+                            nodep->v3error(
+                                "Member "
+                                << nodep->prettyNameQ()
+                                << " is being extended from member marked ':final'"
+                                   " (IEEE 1800-2023 8.20)\n"
+                                << nodep->warnContextPrimary() << "\n"
+                                << fbasep->warnOther()
+                                << "... Location of ':final' declaration being extended\n"
+                                << fbasep->warnContextSecondary());
+                        }
+                    }
+                }
+            }
+        }
+        if (!extended && nodep->baseOverride().isExtends()) {
+            nodep->v3error("Member " << nodep->prettyNameQ()
+                                     << " marked ':extends' but no base class function is"
+                                        " being extend (IEEE 1800-2023 8.20)");
         }
     }
     void visit(AstNodeVarRef* nodep) override {
@@ -232,5 +295,5 @@ public:
 void V3WidthCommit::widthCommit(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { WidthCommitVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("widthcommit", 0, dumpTreeLevel() >= 6);
+    V3Global::dumpCheckGlobalTree("widthcommit", 0, dumpTreeEitherLevel() >= 6);
 }

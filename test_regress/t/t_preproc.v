@@ -72,7 +72,7 @@ Line_Preproc_Check `__LINE__
 	comma","line)
 
 `define withquote(a, bar) a bar LLZZ "a" bar
-`withquote( x , y)  // Simulators disagree here; some substitute "a" others do not
+`withquote( x , y)  // IEEE 1800-2023 clarified that "a" not to substitute
 
 `define noparam (a,b)
 `noparam(a,b)
@@ -82,6 +82,9 @@ $display(`msg(left side, right side))
 
 `define foo(f) f``_suffix
 `foo(bar)  more
+
+`define with_space_before_suffix(f) f`` suffix_after_space
+`with_space_before_suffix(arg)
 
 `define zap(which)   \
 	$c("Zap(\"",which,"\");");
@@ -164,7 +167,7 @@ endmodule
 //"
 
 //======================================================================
-// Check IEEE1800-2017 `pragma protect encrypted modules
+// Check IEEE 1800-2017 `pragma protect encrypted modules
 module t_lint_pragma_protected;
 
 `pragma protect begin_protected
@@ -566,7 +569,7 @@ module t;
 `undef DEF_NO_EXPAND
    //-----
    // bug441 derivative
-   // SHOULD(simulator-dependant): Quotes doesn't prevent arguments from expanding (like backslashes above)
+   // Clarified in IEEE 1800-2023: Quotes prevent arguments from expanding
 `define STR(name) "foo name baz"
    initial $write("GOT='%s' EXP='%s'\n", `STR(bar), "foo bar baz");
 `undef STR
@@ -704,6 +707,18 @@ Second line"""
 `QQQ
 `QQQS("""QQQ defval""")
 
+// string concat bug
+`define IDENTITY(arg) ``arg
+`IDENTITY("string argument")
+
+//======================================================================
+// See issue #5094 - IEEE 1800-2023 clarified proper behavior
+
+`define MAC_WITH_STR(foo) foo "foo foo foo" foo
+`MAC_WITH_STR(bar)
+`define MAC_WITH_3STR(foo) foo """foo foo foo""" foo
+`MAC_WITH_3STR(bar)
+
 //======================================================================
 // IEEE mandated predefines
 `undefineall  // undefineall should have no effect on these
@@ -725,3 +740,16 @@ predef `SV_COV_PARTIAL 2
 //======================================================================
 // After `undefineall above, for testing --dump-defines
 `define WITH_ARG(a) (a)(a)
+
+//======================================================================
+// Stringify in nested macro
+`define foo test
+`define a x,y
+`define bar(a, b) test a b
+`define baz(a, b) test``a``b
+`define qux(x) string boo = x;
+`define quux(x) `qux(`"x`")
+`quux(`foo)
+`quux(`bar(`a,`a))
+`quux(`baz(`a,`bar(x,`a)))
+`quux(`baz(`bar(`a,x), quux(`foo)))

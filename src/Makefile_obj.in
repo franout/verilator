@@ -7,7 +7,7 @@
 #
 #*****************************************************************************
 #
-# Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+# Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 # can redistribute it and/or modify it under the terms of either the GNU
 # Lesser General Public License Version 3 or the Perl Artistic License
 # Version 2.0.
@@ -49,13 +49,14 @@ prefix = @prefix@
 # Directory in which to install data across multiple architectures
 datarootdir = @datarootdir@
 
-# Directory in which to install package specific files
+# Directory in which to install package-specific files
 # Generally ${prefix}/share/verilator
 pkgdatadir = @pkgdatadir@
 
 # Compile options
 CFG_WITH_CCWARN = @CFG_WITH_CCWARN@
 CFG_WITH_DEFENV = @CFG_WITH_DEFENV@
+CFG_WITH_SOLVER = @CFG_WITH_SOLVER@
 CPPFLAGS += @CPPFLAGS@
 CFLAGS += @CFLAGS@
 CXXFLAGS += @CXXFLAGS@
@@ -124,6 +125,13 @@ ifeq ($(CFG_WITH_DEFENV),yes)
   CPPFLAGS += -DDEFENV_VERILATOR_ROOT=\"$(pkgdatadir)\"
  else
   CPPFLAGS += -DDEFENV_VERILATOR_ROOT=\"$(VERILATOR_ROOT)\"
+ endif
+ ifneq ($(CFG_WITH_SOLVER),no)
+  CPPFLAGS += -DDEFENV_VERILATOR_SOLVER='"$(CFG_WITH_SOLVER)"'
+ else
+  ifneq ($(VERILATOR_SOLVER),)
+   CPPFLAGS += -DDEFENV_VERILATOR_SOLVER='"$(VERILATOR_SOLVER)"'
+  endif
  endif
 endif
 
@@ -202,6 +210,7 @@ RAW_OBJS_PCH_ASTMT = \
 	V3Options.o \
 	V3Stats.o \
 	V3StatsReport.o \
+	V3VariableOrder.o \
 
 RAW_OBJS_PCH_ASTNOMT = \
 	V3Active.o \
@@ -228,11 +237,13 @@ RAW_OBJS_PCH_ASTNOMT = \
 	V3Descope.o \
 	V3Dfg.o \
 	V3DfgAstToDfg.o \
+	V3DfgCache.o \
 	V3DfgDecomposition.o \
 	V3DfgDfgToAst.o \
 	V3DfgOptimizer.o \
 	V3DfgPasses.o \
 	V3DfgPeephole.o \
+	V3DfgRegularize.o \
 	V3DupFinder.o \
 	V3EmitCMain.o \
 	V3EmitCMake.o \
@@ -240,6 +251,7 @@ RAW_OBJS_PCH_ASTNOMT = \
 	V3EmitCSyms.o \
 	V3EmitMk.o \
 	V3EmitXml.o \
+	V3ExecGraph.o \
 	V3Expand.o \
 	V3Force.o \
 	V3Fork.o \
@@ -263,23 +275,30 @@ RAW_OBJS_PCH_ASTNOMT = \
 	V3MergeCond.o \
 	V3Name.o \
 	V3Order.o \
+	V3OrderGraphBuilder.o \
+	V3OrderMoveGraph.o \
+	V3OrderParallel.o \
+	V3OrderProcessDomains.o \
+	V3OrderSerial.o \
 	V3Param.o \
-	V3Partition.o \
 	V3Premit.o \
 	V3ProtectLib.o \
 	V3Randomize.o \
 	V3Reloop.o \
+	V3Sampled.o \
 	V3Sched.o \
 	V3SchedAcyclic.o \
 	V3SchedPartition.o \
 	V3SchedReplicate.o \
 	V3SchedTiming.o \
+	V3SchedVirtIface.o \
 	V3Scope.o \
 	V3Scoreboard.o \
 	V3Slice.o \
 	V3Split.o \
 	V3SplitAs.o \
 	V3SplitVar.o \
+	V3StackCount.o \
 	V3Subst.o \
 	V3TSP.o \
 	V3Table.o \
@@ -291,7 +310,6 @@ RAW_OBJS_PCH_ASTNOMT = \
 	V3Undriven.o \
 	V3Unknown.o \
 	V3Unroll.o \
-	V3VariableOrder.o \
 	V3Width.o \
 	V3WidthCommit.o \
 	V3WidthSel.o \
@@ -336,9 +354,6 @@ endif
 $(TGT): $(PREDEP_H) $(OBJS)
 	@echo "      Linking $@..."
 	${LINK} ${LDFLAGS} -o $@ $(OBJS) $(CCMALLOC) ${LIBS}
-
-V3Number_test: V3Number_test.o
-	${LINK} ${LDFLAGS} -o $@ $^ ${LIBS}
 
 #### Modules
 

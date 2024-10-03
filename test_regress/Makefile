@@ -5,7 +5,7 @@
 # This calls the object directory makefile.  That allows the objects to
 # be placed in the "current directory" which simplifies the Makefile.
 #
-# Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+# Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 # can redistribute it and/or modify it under the terms of either the GNU
 # Lesser General Public License Version 3 or the Perl Artistic License
 # Version 2.0.
@@ -16,7 +16,7 @@
 default: test
 
 # This must point to the root of the VERILATOR kit
-VERILATOR_ROOT := $(shell pwd)/..
+VERILATOR_ROOT ?= $(shell pwd)/..
 export VERILATOR_ROOT
 
 # Pick up PERL and other variable settings
@@ -48,30 +48,30 @@ DRIVER_HASHSET ?=
 
 .PHONY: test
 test:
-	$(PERL) driver.pl $(DRIVER_FLAGS) $(SCENARIOS) $(DRIVER_HASHSET)
+	$(PYTHON3) driver.py $(DRIVER_FLAGS) $(SCENARIOS) $(DRIVER_HASHSET)
 
 ######################################################################
 
 vcs:
-	$(PERL) driver.pl $(DRIVER_FLAGS) --vcs --stop
+	$(PYTHON3) driver.py $(DRIVER_FLAGS) --vcs --stop
 
 ######################################################################
 
 nc:
-	$(PERL) driver.pl $(DRIVER_FLAGS) --nc --stop
+	$(PYTHON3) driver.py $(DRIVER_FLAGS) --nc --stop
 
 ######################################################################
 
 vlt:
-	$(PERL) driver.pl $(DRIVER_FLAGS) --vlt --stop
+	$(PYTHON3) driver.py $(DRIVER_FLAGS) --vlt --stop
 
 vltmt:
-	$(PERL) driver.pl $(DRIVER_FLAGS) --vltmt --stop
+	$(PYTHON3) driver.py $(DRIVER_FLAGS) --vltmt --stop
 
 ######################################################################
 
 random:
-	$(PERL) driver.pl $(DRIVER_FLAGS) --optimize : --stop
+	$(PYTHON3) driver.py $(DRIVER_FLAGS) --optimize : --stop
 
 random_forever:
 	while ( VERILATOR_NO_DEBUG=1 CPPFLAGS_ADD=-Wno-error $(MAKE) random ) ; do \
@@ -102,9 +102,9 @@ TEST_SNAP_DIR ?= snapshot
 # Command to diff directories
 TEST_DIFF_TOOL ?= $(if $(shell which icdiff), icdiff -N -r, diff -r)
 
-TEST_SNAP_IGNORE := *.status *.log *.dat *.d *.o *.a *.so *stats.txt *.html \
-                    *.includecache *.out *.fst *.fst.vcd  *.tree *.dot \
-                    *.csv *.xml *.hash *.cmake gmon.out.* CMakeFiles \
+TEST_SNAP_IGNORE := *.status *.log *.dat *.d *.o *.a *.so *stats*.txt *.html \
+                    *.includecache *.out *.fst *.fst.vcd *.tree *.tree*.json \
+                    *.dot *.csv *.xml *.hash *.cmake gmon.out.* CMakeFiles \
                     profile_exec.vcd t_pgo_threads
 
 define TEST_SNAP_template

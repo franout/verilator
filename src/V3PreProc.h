@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2000-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2000-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -23,7 +23,6 @@
 #include "V3Error.h"
 #include "V3FileLine.h"
 #include "V3Global.h"
-#include "V3ThreadSafety.h"
 
 #include <iostream>
 #include <list>
@@ -99,6 +98,7 @@ protected:
 public:
     static V3PreProc* createPreProc(FileLine* fl) VL_MT_DISABLED;
     virtual ~V3PreProc() = default;  // LCOV_EXCL_LINE  // Persistent
+    static void selfTest() VL_MT_DISABLED;
 };
 
 #endif  // Guard

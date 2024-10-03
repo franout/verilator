@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -287,7 +287,7 @@ void V3ParseImp::preprocDumps(std::ostream& os, bool forInputs) {
 void V3ParseImp::parseFile(FileLine* fileline, const string& modfilename, bool inLibrary,
                            const string& errmsg) {  // "" for no error, make fake node
     const string nondirname = V3Os::filenameNonDir(modfilename);
-    const string modname = V3Os::filenameNonExt(modfilename);
+    const string modname = V3Os::filenameNonDirExt(modfilename);
 
     UINFO(2, __FUNCTION__ << ": " << modname << (inLibrary ? " [LIB]" : "") << endl);
     m_lexFileline = new FileLine{fileline};
@@ -331,6 +331,7 @@ void V3ParseImp::parseFile(FileLine* fileline, const string& modfilename, bool i
         }
     }
 
+    V3Stats::addStatSum(V3Stats::STAT_SOURCE_CHARS, m_ppBytes);
     if (debug() && modfilename != V3Options::getStdPackagePath()) dumpInputsFile();
 
     // Parse it
@@ -403,9 +404,9 @@ size_t V3ParseImp::tokenPipeScanParam(size_t depth) {
     int parens = 1;  // Count first (
     while (true) {
         const int tok = tokenPeekp(depth)->token;
-        if (tok == 0) {
+        if (tok == 0) {  // LCOV_EXCL_BR_LINE
             UINFO(9, "tokenPipeScanParam hit EOF; probably syntax error to come");
-            break;
+            break;  // LCOV_EXCL_LINE
         } else if (tok == '(') {
             ++parens;
         } else if (tok == ')') {
@@ -420,7 +421,7 @@ size_t V3ParseImp::tokenPipeScanParam(size_t depth) {
     return depth;
 }
 
-size_t V3ParseImp::tokenPipeScanType(size_t depth) {
+size_t V3ParseImp::tokenPipeScanTypeEq(size_t depth) {
     // Search around IEEE type_reference to see if is expression
     // Return location of following token, or input if not found
     // yTYPE__ETC '(' ... ')'  ['==' '===' '!=' '!===']
@@ -429,9 +430,9 @@ size_t V3ParseImp::tokenPipeScanType(size_t depth) {
     int parens = 1;  // Count first (
     while (true) {
         const int tok = tokenPeekp(depth)->token;
-        if (tok == 0) {
-            UINFO(9, "tokenPipeScanType hit EOF; probably syntax error to come");
-            break;
+        if (tok == 0) {  // LCOV_EXCL_BR_LINE
+            UINFO(9, "tokenPipeScanTypeEq hit EOF; probably syntax error to come");
+            break;  // LCOV_EXCL_LINE
         } else if (tok == '(') {
             ++parens;
         } else if (tok == ')') {
@@ -444,6 +445,20 @@ size_t V3ParseImp::tokenPipeScanType(size_t depth) {
         ++depth;
     }
     return depth;
+}
+
+int V3ParseImp::tokenPipelineId(int token) {
+    const V3ParseBisonYYSType* nexttokp = tokenPeekp(0);  // First char after yaID
+    const int nexttok = nexttokp->token;
+    UASSERT(yylval.token == yaID__LEX, "Start with ID");
+    if (nexttok == yP_COLONCOLON) { return yaID__CC; }
+    VL_RESTORER(yylval);  // Remember value, as about to read ahead
+    if (nexttok == '#') {
+        VL_RESTORER(yylval);  // Remember value, as about to read ahead
+        const size_t depth = tokenPipeScanParam(0);
+        if (tokenPeekp(depth)->token == yP_COLONCOLON) return yaID__CC;
+    }
+    return token;
 }
 
 void V3ParseImp::tokenPipeline() {
@@ -518,7 +533,7 @@ void V3ParseImp::tokenPipeline() {
             }
         } else if (token == yTYPE__LEX) {
             VL_RESTORER(yylval);  // Remember value, as about to read ahead
-            const size_t depth = tokenPipeScanType(0);
+            const size_t depth = tokenPipeScanTypeEq(0);
             const int postToken = tokenPeekp(depth)->token;
             if (  // v-- token                v-- postToken
                   // yTYPE__EQ '(' .... ')' EQ_OPERATOR yTYPE_ETC '(' ... ')'
@@ -551,13 +566,7 @@ void V3ParseImp::tokenPipeline() {
                 token = yWITH__ETC;
             }
         } else if (token == yaID__LEX) {
-            if (nexttok == yP_COLONCOLON) {
-                token = yaID__CC;
-            } else if (nexttok == '#') {
-                VL_RESTORER(yylval);  // Remember value, as about to read ahead
-                const size_t depth = tokenPipeScanParam(0);
-                if (tokenPeekp(depth)->token == yP_COLONCOLON) token = yaID__CC;
-            }
+            token = tokenPipelineId(token);
         }
         // If add to above "else if", also add to "if (token" further above
     }
@@ -636,7 +645,7 @@ void V3ParseImp::tokenPipelineSym() {
                     if (!warned++) {
                         yylval.fl->v3warn(PKGNODECL, "Package/class '" + *yylval.strp
                                                          + "' not found, and needs to be "
-                                                           "predeclared (IEEE 1800-2017 26.3)");
+                                                           "predeclared (IEEE 1800-2023 26.3)");
                     }
                 }
             } else if (token == yaID__LEX) {
@@ -655,7 +664,8 @@ int V3ParseImp::tokenToBison() {
     m_bisonLastFileline = yylval.fl;
 
     // yylval.scp = nullptr;   // Symbol table not yet needed - no packages
-    if (debugFlex() >= 6 || debugBison() >= 6) {  // --debugi-flex and --debugi-bison
+    if (debug() >= 6 || debugFlex() >= 6
+        || debugBison() >= 6) {  // --debugi-flex and --debugi-bison
         cout << "tokenToBison  " << yylval << endl;
     }
     return yylval.token;
@@ -692,3 +702,4 @@ void V3Parse::parseFile(FileLine* fileline, const string& modname, bool inLibrar
 void V3Parse::ppPushText(V3ParseImp* impp, const string& text) {
     if (text != "") impp->ppPushText(text);
 }
+void V3Parse::candidatePli(VSpellCheck* spellerp) { V3ParseImp::candidatePli(spellerp); }

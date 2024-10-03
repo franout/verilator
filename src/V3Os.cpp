@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -45,7 +45,9 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 #define PATH_MAX MAX_PATH
 #else
 #include <dirent.h>
+#include <utime.h>
 #endif
+#include <fcntl.h>
 #include <fstream>
 #include <memory>
 
@@ -58,7 +60,7 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 # include <bcrypt.h>  // BCryptGenRandom
 # include <chrono>
 # include <direct.h>  // mkdir
-# include <psapi.h>   // GetProcessMemoryInfo
+# include <io.h>  // open, read, write, close
 # include <thread>
 // These macros taken from gdbsupport/gdb_wait.h in binutils-gdb
 # ifndef WIFEXITED
@@ -77,30 +79,14 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 #endif
 // clang-format on
 
+#define VL_ALLOW_VERILATEDOS_C
+#include "verilatedos_c.h"
+
 //######################################################################
 // Environment
 
 string V3Os::getenvStr(const string& envvar, const string& defaultValue) {
-    string ret = "";
-#if defined(_MSC_VER)
-    // Note: MinGW does not offer _dupenv_s
-    const char* envvalue = nullptr;
-    _dupenv_s((char**)&envvalue, nullptr, envvar.c_str());
-    if (envvalue != nullptr) {
-        const std::string result{envvalue};
-        free((void*)envvalue);
-        ret = result;
-    } else {
-        ret = defaultValue;
-    }
-#else
-    if (const char* const envvalue = getenv(envvar.c_str())) {
-        ret = envvalue;
-    } else {
-        ret = defaultValue;
-    }
-#endif
-    return VString::escapeStringForPath(ret);
+    return VString::escapeStringForPath(VlOs::getenvStr(envvar, defaultValue));
 }
 
 void V3Os::setenvStr(const string& envvar, const string& value, const string& why) {
@@ -117,7 +103,7 @@ void V3Os::setenvStr(const string& envvar, const string& value, const string& wh
     // setenv() replaced by putenv() in Solaris environment. Prototype is different
     // putenv() requires NAME=VALUE format
     const string vareq = envvar + "=" + value;
-    putenv(const_cast<char*>(vareq.c_str()));
+    putenv(strdup(vareq.c_str()));  // will leak if setting the same variable again
 #endif
 }
 
@@ -179,6 +165,17 @@ string V3Os::filenameDir(const string& filename) VL_PURE {
     }
 }
 
+string V3Os::filenameExt(const string& filename) VL_PURE {
+    string base = filenameNonDir(filename);
+    string::size_type pos;
+    if ((pos = base.find('.')) != string::npos) {
+        base.erase(0, pos);
+        return base;
+    } else {
+        return "";
+    }
+}
+
 string V3Os::filenameNonDir(const string& filename) VL_PURE {
     // std::filesystem::path::filename
     auto it = filename.rbegin();
@@ -188,15 +185,11 @@ string V3Os::filenameNonDir(const string& filename) VL_PURE {
     return string{it.base(), filename.end()};
 }
 
-string V3Os::filenameNonExt(const string& filename) VL_PURE {
+string V3Os::filenameNonDirExt(const string& filename) VL_PURE {
     string base = filenameNonDir(filename);
     string::size_type pos;
     if ((pos = base.find('.')) != string::npos) base.erase(pos);
     return base;
-}
-
-string V3Os::filenameNonDirExt(const string& filename) VL_PURE {
-    return filenameNonExt(filenameNonDir(filename));
 }
 
 string V3Os::filenameSubstitute(const string& filename) {
@@ -260,6 +253,55 @@ string V3Os::filenameRealPath(const string& filename) VL_PURE {
     }
 }
 
+string V3Os::filenameRelativePath(const string& filename, const string& base) VL_PURE {
+    const string a = V3Os::filenameRealPath(filename);
+    const string b = V3Os::filenameRealPath(base);
+    string result;
+    if (a == b) return ".";
+
+    auto aIt = a.begin();
+    auto bIt = b.begin();
+    while (aIt != a.end() && bIt != b.end()) {
+        // UINFO(9, "fnrp scan " << (aIt - a.begin()) << " " << a.substr(aIt - a.begin()) << endl);
+        // UINFO(9, "fnrp scan " << (bIt - b.begin()) << " " << b.substr(bIt - b.begin()) << endl);
+        auto aWordIt = aIt;  // position of next slash
+        for (; aWordIt != a.end(); ++aWordIt) {
+            if (isSlash(*aWordIt)) break;
+        }
+
+        auto bWordIt = bIt;  // position of next slash
+        for (; bWordIt != b.end(); ++bWordIt) {
+            if (isSlash(*bWordIt)) break;
+        }
+
+        const string aWord = a.substr(aIt - a.begin(), aWordIt - aIt);
+        const string bWord = b.substr(bIt - b.begin(), bWordIt - bIt);
+        if (aWord != bWord) break;
+        aIt = aWordIt;
+        bIt = bWordIt;
+        if (aIt != a.end()) ++aIt;  // Skip slash
+        if (bIt != b.end()) ++bIt;  // Skip slash
+    }
+
+    while (bIt != b.end()) {
+        for (; bIt != b.end(); ++bIt) {
+            if (isSlash(*bIt)) {
+                ++bIt;
+                break;
+            }
+        }
+        if (!result.empty()) result += "/";
+        result += "..";
+    }
+
+    const string aLeft = a.substr(aIt - a.begin());
+    if (!aLeft.empty()) {
+        if (!result.empty()) result += "/";
+        result += aLeft;
+    }
+    return filenameCleanup(result);
+}
+
 bool V3Os::filenameIsRel(const string& filename) VL_PURE {
 #if defined(_MSC_VER)
     return std::filesystem::path(filename).is_relative();
@@ -292,6 +334,34 @@ void V3Os::createDir(const string& dirname) {
 #else
     mkdir(dirname.c_str(), 0777);
 #endif
+}
+
+void V3Os::filesystemFlush(const string& dirname) {
+    // NFS caches stat() calls so to get up-to-date information must
+    // do a open or opendir on the filename.
+#if defined(_MSC_VER) || defined(__MINGW32__)
+    if (int fd = ::open(dirname.c_str(), O_RDONLY)) {  // LCOV_EXCL_BR_LINE
+        if (fd > 0) ::close(fd);
+    }
+#else
+    // Faster to just try both rather than check if a file is a dir.
+    if (DIR* const dirp = opendir(dirname.c_str())) {  // LCOV_EXCL_BR_LINE
+        closedir(dirp);  // LCOV_EXCL_LINE
+    } else if (int fd = ::open(dirname.c_str(), O_RDONLY)) {  // LCOV_EXCL_BR_LINE
+        if (fd > 0) ::close(fd);
+    }
+#endif
+}
+
+void V3Os::filesystemFlushBuildDir(const string& dirname) {
+    // Attempt to force out written directory, for NFS like file systems.
+#if !defined(_MSC_VER) && !defined(__MINGW32__)
+    // Linux kernel may not reread from NFS unless timestamp modified
+    const int err = utimes(dirname.c_str(), nullptr);
+    // Not an error
+    if (err != 0) UINFO(1, "-Info: File not utimed: " << dirname << endl);
+#endif
+    filesystemFlush(dirname);
 }
 
 void V3Os::unlinkRegexp(const string& dir, const string& regexp) {
@@ -341,7 +411,9 @@ string V3Os::trueRandom(size_t size) VL_MT_SAFE {
 #if defined(_WIN32) || defined(__MINGW32__)
     const NTSTATUS hr = BCryptGenRandom(nullptr, reinterpret_cast<BYTE*>(data), size,
                                         BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    if (!BCRYPT_SUCCESS(hr)) v3fatal("Could not acquire random data.");
+    if (VL_UNCOVERABLE(!BCRYPT_SUCCESS(hr))) {
+        v3fatal("Could not acquire random data. Try specifying a key instead.");  // LCOV_EXCL_LINE
+    }
 #else
     std::ifstream is{"/dev/urandom", std::ios::in | std::ios::binary};
     // This read uses the size of the buffer.
@@ -364,7 +436,7 @@ uint64_t V3Os::timeUsecs() {
 
     FILETIME ft;  // contains number of 0.1us intervals since the beginning of 1601 UTC.
     GetSystemTimeAsFileTime(&ft);
-    uint64_t us
+    const uint64_t us
         = ((static_cast<uint64_t>(ft.dwHighDateTime) << 32) + ft.dwLowDateTime + 5ULL) / 10ULL;
     return us - EPOCH_DIFFERENCE_USECS;
 #else
@@ -372,30 +444,6 @@ uint64_t V3Os::timeUsecs() {
     timeval tv;
     if (gettimeofday(&tv, nullptr) < 0) return 0;
     return static_cast<uint64_t>(tv.tv_sec) * 1000000 + tv.tv_usec;
-#endif
-}
-
-uint64_t V3Os::memUsageBytes() {
-#if defined(_WIN32) || defined(__MINGW32__)
-    const HANDLE process = GetCurrentProcess();
-    PROCESS_MEMORY_COUNTERS pmc;
-    if (GetProcessMemoryInfo(process, &pmc, sizeof(pmc))) {
-        // The best we can do using simple Windows APIs is to get the size of the working set.
-        return pmc.WorkingSetSize;
-    }
-    return 0;
-#else
-    // Highly unportable. Sorry
-    const char* const statmFilename = "/proc/self/statm";
-    FILE* fp = fopen(statmFilename, "r");
-    if (!fp) return 0;
-    uint64_t size, resident, share, text, lib, data, dt;  // All in pages
-    const int items = fscanf(
-        fp, "%" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64 " %" SCNu64,
-        &size, &resident, &share, &text, &lib, &data, &dt);
-    fclose(fp);
-    if (VL_UNCOVERABLE(7 != items)) return 0;
-    return (text + data) * getpagesize();
 #endif
 }
 
@@ -449,5 +497,23 @@ void V3Os::selfTest() {
     UASSERT_SELFTEST(string, filenameCleanup("aaa/bbb/ccc/"), "aaa/bbb/ccc");
     UASSERT_SELFTEST(string, filenameCleanup("./aaa/bbb/ccc/"), "aaa/bbb/ccc");
     UASSERT_SELFTEST(string, filenameCleanup("../aaa/bbb/ccc/"), "../aaa/bbb/ccc");
+    UASSERT_SELFTEST(string, filenameDir("a.a/b.b/f.e"), "a.a/b.b");
+    UASSERT_SELFTEST(string, filenameExt("a.a/b.b/f"), "");
+    UASSERT_SELFTEST(string, filenameExt("a.a/b.b/f.e"), ".e");
+    UASSERT_SELFTEST(string, filenameNonDirExt("a.a/b.b/f.e"), "f");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b", "/a/b"), ".");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b", "/a/b/c"), "..");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b", "/a/b/c/d"), "../..");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b/x", "/a/b/c/d"), "../../x");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b/x/y", "/"), "a/b/x/y");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b/x/y", "/a/b"), "x/y");
+    UASSERT_SELFTEST(string, filenameRelativePath("/a/b/x/y", "/a/q"), "../b/x/y");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b", "a/b"), ".");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b", "a/b/c"), "..");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b", "a/b/c/d"), "../..");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b/x", "a/b/c/d"), "../../x");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b/x/y", ""), "a/b/x/y");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b/x/y", "a/b"), "x/y");
+    UASSERT_SELFTEST(string, filenameRelativePath("a/b/x/y", "a/q"), "../b/x/y");
 #endif
 }

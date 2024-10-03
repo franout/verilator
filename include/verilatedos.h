@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you can
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you can
 // redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -58,6 +58,9 @@
 # define VL_ATTR_PRINTF(fmtArgNum) __attribute__((format(printf, (fmtArgNum), (fmtArgNum) + 1)))
 # define VL_ATTR_PURE __attribute__((pure))
 # define VL_ATTR_UNUSED __attribute__((unused))
+#ifndef VL_ATTR_WARN_UNUSED_RESULT
+# define VL_ATTR_WARN_UNUSED_RESULT __attribute__((warn_unused_result))
+#endif
 # if !defined(_WIN32) && !defined(__MINGW32__)
 // All VL_ATTR_WEAK symbols must be marked with the macOS -U linker flag in verilated.mk.in
 #  define VL_ATTR_WEAK __attribute__((weak))
@@ -138,7 +141,7 @@
 
 // Defaults for unsupported compiler features
 #ifndef VL_ATTR_ALWINLINE
-# define VL_ATTR_ALWINLINE  ///< Attribute to inline, even when not optimizing
+# define VL_ATTR_ALWINLINE inline  ///< Attribute to inline, even when not optimizing
 #endif
 #ifndef VL_ATTR_NOINLINE
 # define VL_ATTR_NOINLINE  ///< Attribute to never inline, even when optimizing
@@ -163,6 +166,9 @@
 #endif
 #ifndef VL_ATTR_UNUSED
 # define VL_ATTR_UNUSED  ///< Attribute that function that may be never used
+#endif
+#ifndef VL_ATTR_WARN_UNUSED_RESULT
+# define VL_ATTR_WARN_UNUSED_RESULT  ///< Attribute that return value of function must be used
 #endif
 #ifndef VL_ATTR_WEAK
 # define VL_ATTR_WEAK  ///< Attribute that function external that is optionally defined
@@ -194,6 +200,11 @@
 
 // Comment tag that Function is pure (and thus also VL_MT_SAFE)
 #define VL_PURE VL_CLANG_ATTR(annotate("PURE"))
+// Annotated function can be called only in MT_DISABLED context, i.e. either in a code unit
+// compiled with VL_MT_DISABLED_CODE_UNIT preprocessor definition, or in the main thread.
+#define VL_MT_DISABLED \
+    VL_CLANG_ATTR(annotate("MT_DISABLED")) \
+    VL_EXCLUDES(VlOs::MtScopeMutex::s_haveThreadScope)
 // Comment tag that function is threadsafe
 #define VL_MT_SAFE VL_CLANG_ATTR(annotate("MT_SAFE"))
 // Comment tag that function is threadsafe, only if
@@ -210,7 +221,7 @@
 // protected to make sure single-caller
 #define VL_MT_UNSAFE_ONE VL_CLANG_ATTR(annotate("MT_UNSAFE_ONE"))
 // Comment tag that function is entry point of parallelization
-#define VL_MT_START VL_CLANG_ATTR(annotate("MT_START"))
+#define VL_MT_START VL_CLANG_ATTR(annotate("MT_START")) VL_REQUIRES(VlOs::MtScopeMutex::s_haveThreadScope)
 
 #ifndef VL_NO_LEGACY
 # define VL_ULL(c) (c##ULL)  // Add appropriate suffix to 64-bit constant (deprecated)
@@ -258,11 +269,11 @@
 #endif
 
 //=========================================================================
-// C++-2011
+// C++-2014
 
-#if __cplusplus >= 201103L || defined(__GXX_EXPERIMENTAL_CXX0X__) || defined(VL_CPPCHECK) || defined(_MSC_VER)
+#if __cplusplus >= 201402L || defined(VL_CPPCHECK) || defined(_MSC_VER)
 #else
-# error "Verilator requires a C++11 or newer compiler"
+# error "Verilator requires a C++14 or newer compiler"
 #endif
 
 #ifndef VL_NO_LEGACY
@@ -337,6 +348,7 @@ extern "C" void __gcov_dump();
 #include <cstdint>
 #include <cinttypes>
 #include <cmath>
+#include <ctime>
 
 #ifndef VL_NO_LEGACY
 using vluint8_t = uint8_t;  ///< 8-bit unsigned type (backward compatibility)
@@ -450,7 +462,7 @@ using ssize_t = uint32_t;  ///< signed size_t; returned from read()
 //=========================================================================
 // Verilated function size macros
 
-#define VL_MULS_MAX_WORDS 16  ///< Max size in words of MULS operation
+#define VL_MULS_MAX_WORDS 128  ///< Max size in words of MULS operation
 
 #ifndef VL_VALUE_STRING_MAX_WORDS
     #define VL_VALUE_STRING_MAX_WORDS 64  ///< Max size in words of String conversion operation
@@ -581,9 +593,9 @@ static inline double VL_ROUND(double n) {
 #endif
 
 //=========================================================================
-// Macros controlling target specific optimizations
+// Macros controlling target-specific optimizations
 
-// Define VL_PORTABLE_ONLY to disable all target specific optimizations
+// Define VL_PORTABLE_ONLY to disable all target-specific optimizations
 #ifndef VL_PORTABLE_ONLY
 # ifdef __x86_64__
 #  define VL_X86_64 1
@@ -605,6 +617,58 @@ static inline double VL_ROUND(double n) {
     (reinterpret_cast<size_t>(&(reinterpret_cast<type*>(0x10000000)->field)) - 0x10000000)
 
 //=========================================================================
+// Time and performance
+
+#include <string>
+
+namespace VlOs {
+
+/// Get environment variable
+extern std::string getenvStr(const std::string& envvar,
+                             const std::string& defaultValue) VL_MT_SAFE;
+extern uint64_t memUsageBytes() VL_MT_SAFE;  ///< Return memory usage in bytes, or 0 if unknown
+
+// Internal: Record CPU time, starting point on construction, and current delta from that
+class DeltaCpuTime final {
+    double m_start{};  // Time constructed at
+    static double gettime() VL_MT_SAFE;
+
+public:
+    // Construct, and if startit is true, start() timer
+    explicit DeltaCpuTime(bool startit) {
+        if (startit) start();
+    }
+    void start() VL_MT_SAFE { m_start = gettime(); }  // Start timer; record current time
+    double deltaTime() const VL_MT_SAFE {  // Return time between now and start()
+        return (m_start == 0.0) ? 0.0 : gettime() - m_start;
+    }
+};
+// Internal: Record wall time, starting point on construction, and current delta from that
+class DeltaWallTime final {
+    double m_start{};  // Time constructed at
+    static double gettime() VL_MT_SAFE;
+
+public:
+    // Construct, and if startit is true, start() timer
+    explicit DeltaWallTime(bool startit) {
+        if (startit) start();
+    }
+    void start() VL_MT_SAFE { m_start = gettime(); }  // Start timer; record current time
+    double deltaTime() const VL_MT_SAFE {  // Return time between now and start()
+        return (m_start == 0.0) ? 0.0 : gettime() - m_start;
+    }
+};
+
+// Used by clang's -fthread-safety, ensures that only one instance of V3ThreadScope
+// is created at a time
+class VL_CAPABILITY("mutex") MtScopeMutex final {
+public:
+    static MtScopeMutex s_haveThreadScope;
+};
+
+}  //namespace VlOs
+
+//=========================================================================
 // Conversions
 
 #include <utility>
@@ -612,7 +676,7 @@ static inline double VL_ROUND(double n) {
 namespace vlstd {
 
 template <typename T>
-struct reverse_wrapper {
+struct reverse_wrapper final {
     const T& m_v;
 
     explicit reverse_wrapper(const T& a_v)
@@ -635,14 +699,6 @@ reverse_wrapper<T> reverse_view(const T& v) {
 template <class T>
 T const& as_const(T& v) VL_MT_SAFE {
     return v;
-}
-
-// C++14's std::exchange
-template <class T, class U = T>
-T exchange(T& obj, U&& new_value) {
-    T old_value = std::move(obj);
-    obj = std::forward<U>(new_value);
-    return old_value;
 }
 
 };  // namespace vlstd

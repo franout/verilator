@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -31,6 +31,7 @@
 #include "V3Ast__gen_forward_class_decls.h"  // From ./astgen
 
 #include <cmath>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <set>
@@ -47,9 +48,6 @@ class ExecMTask;
 class VFlagLogicPacked {};
 class VFlagBitPacked {};
 class VFlagChildDType {};  // Used by parser.y to select constructor that sets childDType
-
-// Used as key for another map, needs operator<, hence not an unordered_set
-using MTaskIdSet = std::set<int>;  // Set of mtaskIds for Var sorting
 
 //######################################################################
 
@@ -98,7 +96,7 @@ using MTaskIdSet = std::set<int>;  // Set of mtaskIds for Var sorting
 
 //######################################################################
 
-struct VNTypeInfo {
+struct VNTypeInfo final {
     const char* m_namep;
     enum uint8_t {
         OP_UNUSED,
@@ -107,6 +105,7 @@ struct VNTypeInfo {
         OP_OPTIONAL,
     } m_opType[4];
     const char* m_opNamep[4];
+    size_t m_sizeof;
 };
 
 class VNType final {
@@ -124,6 +123,7 @@ public:
     constexpr VNType(en _e) VL_MT_SAFE : m_e{_e} {}
     explicit VNType(int _e)
         : m_e(static_cast<en>(_e)) {}  // Need () or GCC 4.8 false warning
+    // cppcheck-suppress danglingTempReference
     const VNTypeInfo* typeInfo() const VL_MT_SAFE { return &typeInfoTable[m_e]; }
     constexpr operator en() const VL_MT_SAFE { return m_e; }
 };
@@ -215,7 +215,7 @@ public:
         return names[m_e];
     }
     const char* arrow() const {
-        static const char* const names[] = {"[RV] <-", "[LV] =>", "[LV] <=>", "--"};
+        static const char* const names[] = {"[RV] <-", "[LV] =>", "[LRV] <=>", "--"};
         return names[m_e];
     }
     VAccess()
@@ -239,6 +239,51 @@ constexpr bool operator==(const VAccess& lhs, const VAccess& rhs) { return lhs.m
 constexpr bool operator==(const VAccess& lhs, VAccess::en rhs) { return lhs.m_e == rhs; }
 constexpr bool operator==(VAccess::en lhs, const VAccess& rhs) { return lhs == rhs.m_e; }
 inline std::ostream& operator<<(std::ostream& os, const VAccess& rhs) { return os << rhs.ascii(); }
+
+// ######################################################################
+
+class VBaseOverride final {
+    bool m_extends : 1;
+    bool m_final : 1;
+    bool m_initial : 1;
+
+public:
+    VBaseOverride()
+        : m_extends{false}
+        , m_final{false}
+        , m_initial{false} {}
+    class Extends {};
+    explicit VBaseOverride(Extends)
+        : m_extends{true}
+        , m_final{false}
+        , m_initial{false} {}
+    class Final {};
+    explicit VBaseOverride(Final)
+        : m_extends{false}
+        , m_final{true}
+        , m_initial{false} {}
+    class Initial {};
+    explicit VBaseOverride(Initial)
+        : m_extends{false}
+        , m_final{false}
+        , m_initial{true} {}
+    void combine(const VBaseOverride& other) {
+        m_extends |= other.m_extends;
+        m_final |= other.m_final;
+        m_initial |= other.m_initial;
+    }
+    bool isAny() const { return m_extends | m_final | m_initial; }
+    bool isExtends() const { return m_extends; }
+    bool isFinal() const { return m_final; }
+    bool isInitial() const { return m_initial; }
+    string ascii() const {
+        string out;
+        if (m_initial) out = VString::dot(out, " ", "initial");
+        if (m_extends) out = VString::dot(out, " ", "extends");
+        if (m_final) out = VString::dot(out, " ", "final");
+        return out;
+    }
+};
 
 // ######################################################################
 
@@ -285,11 +330,14 @@ public:
         ILLEGAL,
         COVERAGE_BLOCK_OFF,
         HIER_BLOCK,
+        HIER_PARAMS,
         INLINE_MODULE,
         NO_INLINE_MODULE,
         NO_INLINE_TASK,
         PUBLIC_MODULE,
         PUBLIC_TASK,
+        UNROLL_DISABLE,
+        UNROLL_FULL,
         FULL_CASE,
         PARALLEL_CASE,
         ENUM_SIZE
@@ -318,7 +366,6 @@ public:
     enum en : uint8_t {
         // These must be in general -> most specific order, as we sort by it
         // in V3Const::visit AstSenTree
-        ET_ILLEGAL,
         // Involving a variable
         ET_CHANGED,  // Value changed
         ET_BOTHEDGE,  // POSEDGE | NEGEDGE (i.e.: 'edge' in Verilog)
@@ -338,8 +385,6 @@ public:
     enum en m_e;
     bool clockedStmt() const {
         static const bool clocked[] = {
-            false,  // ET_ILLEGAL
-
             true,  // ET_CHANGED
             true,  // ET_BOTHEDGE
             true,  // ET_POSEDGE
@@ -363,20 +408,19 @@ public:
         case ET_BOTHEDGE: return ET_BOTHEDGE;
         case ET_POSEDGE: return ET_NEGEDGE;
         case ET_NEGEDGE: return ET_POSEDGE;
-        default: UASSERT_STATIC(0, "Inverting bad edgeType()");
+        default: UASSERT_STATIC(0, "Inverting bad edgeType()"); return ET_NEGEDGE;
         }
-        return VEdgeType::ET_ILLEGAL;
     }
     const char* ascii() const {
         static const char* const names[]
-            = {"%E-edge", "CHANGED", "BOTH",   "POS",     "NEG",   "EVENT", "TRUE",
-               "COMBO",   "HYBRID",  "STATIC", "INITIAL", "FINAL", "NEVER"};
+            = {"CHANGED", "BOTH",   "POS",    "NEG",     "EVENT", "TRUE",
+               "COMBO",   "HYBRID", "STATIC", "INITIAL", "FINAL", "NEVER"};
         return names[m_e];
     }
     const char* verilogKwd() const {
         static const char* const names[]
-            = {"%E-edge", "[changed]", "edge",     "posedge",   "negedge", "[event]", "[true]",
-               "*",       "[hybrid]",  "[static]", "[initial]", "[final]", "[never]"};
+            = {"[changed]", "edge",     "posedge",  "negedge",   "[event]", "[true]",
+               "*",         "[hybrid]", "[static]", "[initial]", "[final]", "[never]"};
         return names[m_e];
     }
     // Return true iff this and the other have mutually exclusive transitions
@@ -392,8 +436,6 @@ public:
         }
         return false;
     }
-    VEdgeType()
-        : m_e{ET_ILLEGAL} {}
     // cppcheck-suppress noExplicitConstructor
     constexpr VEdgeType(en _e)
         : m_e{_e} {}
@@ -518,6 +560,7 @@ public:
         DYNAMIC_TRIGGER_SCHEDULER,
         FORK_SYNC,
         PROCESS_REFERENCE,
+        RANDOM_GENERATOR,
         // Unsigned and two state; fundamental types
         UINT32,
         UINT64,
@@ -551,6 +594,7 @@ public:
                                             "VlDynamicTriggerScheduler",
                                             "VlFork",
                                             "VlProcessRef",
+                                            "VlRandomizer",
                                             "IData",
                                             "QData",
                                             "LOGIC_IMPLICIT",
@@ -558,20 +602,13 @@ public:
         return names[m_e];
     }
     const char* dpiType() const {
-        static const char* const names[] = {"%E-unk",        "svBit",
-                                            "char",          "void*",
-                                            "char",          "int",
-                                            "%E-integer",    "svLogic",
-                                            "long long",     "double",
-                                            "short",         "%E-time",
-                                            "const char*",   "%E-untyped",
-                                            "dpiScope",      "const char*",
-                                            "%E-mtaskstate", "%E-triggervec",
-                                            "%E-dly-sched",  "%E-trig-sched",
-                                            "%E-dyn-sched",  "%E-fork",
-                                            "%E-proc-ref",   "IData",
-                                            "QData",         "%E-logic-implct",
-                                            " MAX"};
+        static const char* const names[]
+            = {"%E-unk",       "svBit",           "char",          "void*",        "char",
+               "int",          "%E-integer",      "svLogic",       "long long",    "double",
+               "short",        "%E-time",         "const char*",   "%E-untyped",   "dpiScope",
+               "const char*",  "%E-mtaskstate",   "%E-triggervec", "%E-dly-sched", "%E-trig-sched",
+               "%E-dyn-sched", "%E-fork",         "%E-proc-ref",   "%E-rand-gen",  "IData",
+               "QData",        "%E-logic-implct", " MAX"};
         return names[m_e];
     }
     static void selfTest() {
@@ -611,6 +648,7 @@ public:
         case DYNAMIC_TRIGGER_SCHEDULER: return 0;  // opaque
         case FORK_SYNC: return 0;  // opaque
         case PROCESS_REFERENCE: return 0;  // opaque
+        case RANDOM_GENERATOR: return 0;  // opaque
         case UINT32: return 32;
         case UINT64: return 64;
         default: return 0;
@@ -650,7 +688,8 @@ public:
         return (m_e == EVENT || m_e == STRING || m_e == SCOPEPTR || m_e == CHARPTR
                 || m_e == MTASKSTATE || m_e == TRIGGERVEC || m_e == DELAY_SCHEDULER
                 || m_e == TRIGGER_SCHEDULER || m_e == DYNAMIC_TRIGGER_SCHEDULER || m_e == FORK_SYNC
-                || m_e == PROCESS_REFERENCE || m_e == DOUBLE || m_e == UNTYPED);
+                || m_e == PROCESS_REFERENCE || m_e == RANDOM_GENERATOR || m_e == DOUBLE
+                || m_e == UNTYPED);
     }
     bool isDouble() const VL_MT_SAFE { return m_e == DOUBLE; }
     bool isEvent() const { return m_e == EVENT; }
@@ -682,7 +721,7 @@ public:
             /* UNKNOWN:                   */ "",  // Should not be traced
             /* BIT:                       */ "BIT",
             /* BYTE:                      */ "BYTE",
-            /* CHANDLE:                   */ "",
+            /* CHANDLE:                   */ "LONGINT",
             /* EVENT:                     */ "EVENT",
             /* INT:                       */ "INT",
             /* INTEGER:                   */ "INTEGER",
@@ -749,6 +788,7 @@ public:
     bool isAny() const { return m_e != NONE; }
     // Looks like inout - "ish" because not identical to being an INOUT
     bool isInoutish() const { return m_e == INOUT; }
+    bool isInput() const { return m_e == INPUT; }
     bool isNonOutput() const {
         return m_e == INPUT || m_e == INOUT || m_e == REF || m_e == CONSTREF;
     }
@@ -757,11 +797,15 @@ public:
     bool isRef() const VL_MT_SAFE { return m_e == REF; }
     bool isConstRef() const VL_MT_SAFE { return m_e == CONSTREF; }
 };
-constexpr bool operator==(const VDirection& lhs, const VDirection& rhs) {
+constexpr bool operator==(const VDirection& lhs, const VDirection& rhs) VL_MT_SAFE {
     return lhs.m_e == rhs.m_e;
 }
-constexpr bool operator==(const VDirection& lhs, VDirection::en rhs) { return lhs.m_e == rhs; }
-constexpr bool operator==(VDirection::en lhs, const VDirection& rhs) { return lhs == rhs.m_e; }
+constexpr bool operator==(const VDirection& lhs, VDirection::en rhs) VL_MT_SAFE {
+    return lhs.m_e == rhs;
+}
+constexpr bool operator==(VDirection::en lhs, const VDirection& rhs) VL_MT_SAFE {
+    return lhs == rhs.m_e;
+}
 inline std::ostream& operator<<(std::ostream& os, const VDirection& rhs) {
     return os << rhs.ascii();
 }
@@ -858,7 +902,7 @@ public:
         TRIWIRE,
         TRI0,
         TRI1,
-        PORT,  // Temp type used in parser only
+        PORT,  // Used in parser and V3Fork to recognize ports
         BLOCKTEMP,
         MODULETEMP,
         STMTTEMP,
@@ -1054,6 +1098,156 @@ constexpr bool operator==(const VAlwaysKwd& lhs, const VAlwaysKwd& rhs) {
 }
 constexpr bool operator==(const VAlwaysKwd& lhs, VAlwaysKwd::en rhs) { return lhs.m_e == rhs; }
 constexpr bool operator==(VAlwaysKwd::en lhs, const VAlwaysKwd& rhs) { return lhs == rhs.m_e; }
+
+// ######################################################################
+
+class VAssertCtlType final {
+public:
+    // IEEE 1800-2023 Table 20-5
+    enum en : uint8_t {
+        _TO_BE_EVALUATED = 0,
+        LOCK = 1,
+        UNLOCK = 2,
+        ON = 3,
+        OFF = 4,
+        KILL = 5,
+        PASS_ON = 6,
+        PASS_OFF = 7,
+        FAIL_ON = 8,
+        FAIL_OFF = 9,
+        NONVACUOUS_ON = 10,
+        VACUOUS_OFF = 11
+    };
+    enum en m_e;
+    VAssertCtlType()
+        : m_e{_TO_BE_EVALUATED} {}
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VAssertCtlType(en _e)
+        : m_e{_e} {}
+    explicit VAssertCtlType(int _e)
+        : m_e(static_cast<en>(_e)) {}  // Need () or GCC 4.8 false warning
+    constexpr operator en() const { return m_e; }
+    const char* ascii() const {
+        // IEEE 1800-2023 20.11
+        static const char* const names[] = {"",
+                                            "",
+                                            "",
+                                            "$asserton",
+                                            "$assertoff",
+                                            "$assertkill",
+                                            "$assertpasson",
+                                            "$assertpassoff",
+                                            "$assertfailon",
+                                            "$assertfailoff",
+                                            "$assertnonvacuouson",
+                                            "$assertvacuousoff"};
+        return names[m_e];
+    }
+};
+constexpr bool operator==(const VAssertCtlType& lhs, const VAssertCtlType& rhs) {
+    return lhs.m_e == rhs.m_e;
+}
+constexpr bool operator==(const VAssertCtlType& lhs, VAssertCtlType::en rhs) {
+    return lhs.m_e == rhs;
+}
+constexpr bool operator==(VAssertCtlType::en lhs, const VAssertCtlType& rhs) {
+    return lhs == rhs.m_e;
+}
+
+// ######################################################################
+
+class VAssertDirectiveType final {
+public:
+    // IEEE 1800-2023 Table 20-7
+    enum en : uint8_t {
+        INTERNAL = 0,  // Non IEEE type, for directives to be evaluated from expression.
+        ASSERT = (1 << 0),
+        COVER = (1 << 1),
+        ASSUME = (1 << 2),
+        VIOLATION_CASE = (1 << 3),  // Non IEEE type, for case constructs
+                                    // with unique, unique0 or priority pragmas.
+        VIOLATION_IF = (1 << 4),  // Non IEEE type, for if constructs
+                                  // with unique, unique0 or priority pragmas.
+        INTRINSIC = (1 << 5),  // Non IEEE type, for intrinsic assertions.
+        RESTRICT = (1 << 6),  // Non IEEE type, for ignored restrict assertions.
+    };
+    enum en m_e;
+    VAssertDirectiveType()
+        : m_e{ASSERT} {}
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VAssertDirectiveType(en _e)
+        : m_e{_e} {}
+    explicit VAssertDirectiveType(int _e)
+        : m_e(static_cast<en>(_e)) {}  // Need () or GCC 4.8 false warning
+    const char* ascii() const {
+        static const char* const names[]
+            = {"INTERNAL",       "ASSERT",       "COVER",     "ASSUME",
+               "VIOLATION_CASE", "VIOLATION_IF", "INTRINSIC", "RESTRICT"};
+        return names[m_e];
+    }
+    constexpr operator en() const { return m_e; }
+};
+constexpr bool operator==(const VAssertDirectiveType& lhs, const VAssertDirectiveType& rhs) {
+    return lhs.m_e == rhs.m_e;
+}
+constexpr bool operator==(const VAssertDirectiveType& lhs, VAssertDirectiveType::en rhs) {
+    return lhs.m_e == rhs;
+}
+constexpr bool operator==(VAssertDirectiveType::en lhs, const VAssertDirectiveType& rhs) {
+    return lhs == rhs.m_e;
+}
+constexpr VAssertDirectiveType::en operator|(VAssertDirectiveType::en lhs,
+                                             VAssertDirectiveType::en rhs) {
+    return VAssertDirectiveType::en(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+
+// ######################################################################
+
+class VAssertType final {
+public:
+    // IEEE 1800-2023 Table 20-6
+    enum en : uint8_t {
+        INTERNAL = 0,  // Non IEEE type, for assertions that should not be controlled.
+        CONCURRENT = (1 << 0),
+        SIMPLE_IMMEDIATE = (1 << 1),
+        OBSERVED_DEFERRED_IMMEDIATE = (1 << 2),
+        FINAL_DEFERRED_IMMEDIATE = (1 << 3),
+        EXPECT = (1 << 4),
+        UNIQUE = (1 << 5),
+        UNIQUE0 = (1 << 6),
+        PRIORITY = (1 << 7),
+    };
+    enum en m_e;
+    VAssertType()
+        : m_e{INTERNAL} {}
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VAssertType(en _e)
+        : m_e{_e} {}
+    explicit VAssertType(int _e)
+        : m_e(static_cast<en>(_e)) {}  // Need () or GCC 4.8 false warning
+    bool containsAny(VAssertType other) const { return m_e & other.m_e; }
+    const char* ascii() const {
+        static const char* const names[] = {"INTERNAL",
+                                            "CONCURRENT",
+                                            "SIMPLE_IMMEDIATE",
+                                            "OBSERVED_DEFERRED_IMMEDIATE",
+                                            "FINAL_DEFERRED_IMMEDIATE",
+                                            "EXPECT",
+                                            "UNIQUE",
+                                            "UNIQUE0",
+                                            "PRIORITY"};
+        return names[m_e];
+    }
+    constexpr operator en() const { return m_e; }
+};
+constexpr bool operator==(const VAssertType& lhs, const VAssertType& rhs) {
+    return lhs.m_e == rhs.m_e;
+}
+constexpr bool operator==(const VAssertType& lhs, VAssertType::en rhs) { return lhs.m_e == rhs; }
+constexpr bool operator==(VAssertType::en lhs, const VAssertType& rhs) { return lhs == rhs.m_e; }
+constexpr VAssertType::en operator|(VAssertType::en lhs, VAssertType::en rhs) {
+    return VAssertType::en(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
 
 // ######################################################################
 
@@ -1396,6 +1590,7 @@ public:
                "ENUM_IMPLICIT", "DYNAMIC_CLASS", "INCOMPATIBLE"};
         return names[m_e];
     }
+    bool isAssignable() const { return m_e != UNSUPPORTED && m_e != INCOMPATIBLE; }
     VCastable()
         : m_e{UNSUPPORTED} {}
     // cppcheck-suppress noExplicitConstructor
@@ -1456,7 +1651,6 @@ public:
 //  string 'this', or 'vlSymsp->...'
 
 class VSelfPointerText final {
-private:
     // STATIC MEMBERS
     // Keep these in shared pointers to avoid branching for special cases
     static const std::shared_ptr<const string> s_emptyp;  // Holds ""
@@ -1468,10 +1662,10 @@ private:
 public:
     // CONSTRUCTORS
     class Empty {};  // for creator type-overload selection
-    VSelfPointerText(Empty)
+    explicit VSelfPointerText(Empty)
         : m_strp{s_emptyp} {}
     class This {};  // for creator type-overload selection
-    VSelfPointerText(This)
+    explicit VSelfPointerText(This)
         : m_strp{s_thisp} {}
     VSelfPointerText(This, const string& field)
         : m_strp{std::make_shared<const string>("this->" + field)} {}
@@ -1487,6 +1681,36 @@ public:
     const std::string& asString() const { return *m_strp; }
     bool operator==(const VSelfPointerText& other) const { return *m_strp == *other.m_strp; }
 };
+
+// ######################################################################
+// Defines what kind of randomization is done on a variable
+
+class VRandAttr final {
+public:
+    enum en : uint8_t {
+        NONE,  // Not randomizable
+        RAND,  // Has a rand modifier
+        RAND_CYCLIC,  // Has a randc modifier
+        RAND_INLINE  // Not rand/randc, but used in inline random variable control
+    };
+    enum en m_e;
+    const char* ascii() const {
+        static const char* const names[] = {"NONE", "RAND", "RANDC", "RAND-INLINE"};
+        return names[m_e];
+    }
+    VRandAttr()
+        : m_e{NONE} {}
+    // cppcheck-suppress noExplicitConstructor
+    constexpr VRandAttr(en _e)
+        : m_e{_e} {}
+    constexpr operator en() const { return m_e; }
+    bool isRandomizable() const { return m_e != NONE; }
+    bool isRand() const { return m_e == RAND || m_e == RAND_CYCLIC; }
+    bool isRandC() const { return m_e == RAND_CYCLIC; }
+};
+inline std::ostream& operator<<(std::ostream& os, const VRandAttr& rhs) {
+    return os << rhs.ascii();
+}
 
 //######################################################################
 // AstNUser - Generic base class for AST User nodes.
@@ -1853,7 +2077,8 @@ protected:
     // CONSTRUCTORS
     AstNode(VNType t, FileLine* fl);
     virtual AstNode* clone() = 0;  // Generally, cloneTree is what you want instead
-    virtual void cloneRelink() {}
+    virtual void cloneRelink() { cloneRelinkGen(); }
+    virtual void cloneRelinkGen() = 0;  // Generated by 'astgen'
     void cloneRelinkTree();
 
     // METHODS
@@ -1949,7 +2174,7 @@ public:
     static constexpr int INSTR_COUNT_PLI = 20;  // PLI routines
 
     // ACCESSORS
-    virtual string name() const { return ""; }
+    virtual string name() const VL_MT_STABLE { return ""; }
     virtual string origName() const { return ""; }
     virtual void name(const string& name) {
         this->v3fatalSrc("name() called on object without name() method");
@@ -1957,14 +2182,14 @@ public:
     virtual void tag(const string& text) {}
     virtual string tag() const { return ""; }
     virtual string verilogKwd() const { return ""; }
-    string nameProtect() const;  // Name with --protect-id applied
+    string nameProtect() const VL_MT_STABLE;  // Name with --protect-id applied
     string origNameProtect() const;  // origName with --protect-id applied
     string shortName() const;  // Name with __PVT__ removed for concatenating scopes
     static string dedotName(const string& namein);  // Name with dots removed
     static string prettyName(const string& namein) VL_PURE;  // Name for printing out to the user
     static string vpiName(const string& namein);  // Name for vpi access
     static string prettyNameQ(const string& namein) {  // Quoted pretty name (for errors)
-        return std::string{"'"} + prettyName(namein) + "'";
+        return "'"s + prettyName(namein) + "'";
     }
     // Encode user name into internal C representation
     static string encodeName(const string& namein);
@@ -1979,8 +2204,8 @@ public:
     void fileline(FileLine* fl) { m_fileline = fl; }
     inline bool width1() const;
     inline int widthInstrs() const;
-    void didWidth(bool flag) { m_flags.didWidth = flag; }
     bool didWidth() const { return m_flags.didWidth; }
+    void didWidth(bool flag) { m_flags.didWidth = flag; }
     bool didWidthAndSet() {
         if (didWidth()) return true;
         didWidth(true);
@@ -1993,7 +2218,7 @@ public:
 
     // TODO stomp these width functions out, and call via dtypep() instead
     inline int width() const VL_MT_STABLE;
-    inline int widthMin() const;
+    inline int widthMin() const VL_MT_STABLE;
     int widthMinV() const {
         return v3Global.widthMinUsage() == VWidthMinUsage::VERILOG_WIDTH ? widthMin() : width();
     }
@@ -2079,6 +2304,7 @@ public:
     // ACCESSORS for specific types
     // Alas these can't be virtual or they break when passed a nullptr
     inline bool isClassHandleValue() const;
+    inline bool isNull() const;
     inline bool isZero() const;
     inline bool isOne() const;
     inline bool isNeqZero() const;
@@ -2117,8 +2343,8 @@ public:
     void dtypeSetUInt32() { dtypep(findUInt32DType()); }  // Twostate
     void dtypeSetUInt64() { dtypep(findUInt64DType()); }  // Twostate
     void dtypeSetEmptyQueue() { dtypep(findEmptyQueueDType()); }
-    void dtypeSetVoid() { dtypep(findVoidDType()); }
     void dtypeSetStream() { dtypep(findStreamDType()); }
+    void dtypeSetVoid() { dtypep(findVoidDType()); }
 
     // Data type locators
     AstNodeDType* findBitDType() const { return findBasicDType(VBasicDTypeKwd::LOGIC); }
@@ -2128,15 +2354,17 @@ public:
     AstNodeDType* findUInt32DType() const { return findBasicDType(VBasicDTypeKwd::UINT32); }
     AstNodeDType* findUInt64DType() const { return findBasicDType(VBasicDTypeKwd::UINT64); }
     AstNodeDType* findCHandleDType() const { return findBasicDType(VBasicDTypeKwd::CHANDLE); }
+    AstNodeDType* findConstraintRefDType() const;
     AstNodeDType* findEmptyQueueDType() const;
-    AstNodeDType* findVoidDType() const;
-    AstNodeDType* findStreamDType() const;
     AstNodeDType* findQueueIndexDType() const;
+    AstNodeDType* findStreamDType() const;
+    AstNodeDType* findVoidDType() const;
     AstNodeDType* findBitDType(int width, int widthMin, VSigning numeric) const;
     AstNodeDType* findLogicDType(int width, int widthMin, VSigning numeric) const;
     AstNodeDType* findLogicRangeDType(const VNumRange& range, int widthMin,
-                                      VSigning numeric) const;
-    AstNodeDType* findBitRangeDType(const VNumRange& range, int widthMin, VSigning numeric) const;
+                                      VSigning numeric) const VL_MT_STABLE;
+    AstNodeDType* findBitRangeDType(const VNumRange& range, int widthMin,
+                                    VSigning numeric) const VL_MT_STABLE;
     AstNodeDType* findBasicDType(VBasicDTypeKwd kwd) const;
     static AstBasicDType* findInsertSameDType(AstBasicDType* nodep);
 
@@ -2156,6 +2384,9 @@ public:
     string warnOther() const VL_REQUIRES(V3Error::s().m_mutex) { return fileline()->warnOther(); }
 
     virtual void dump(std::ostream& str = std::cout) const;
+    static char* dumpTreeJsonGdb(const AstNode* nodep);  // For GDB only, free()d by caller
+    static char* dumpTreeJsonGdb(const char* str);  // For GDB only, free()d by caller
+    static char* dumpTreeJsonGdb(intptr_t nodep);  // For GDB only, free()d by caller
     static void dumpGdb(const AstNode* nodep);  // For GDB only
     void dumpGdbHeader() const;
 
@@ -2206,11 +2437,28 @@ public:
     static void dumpTreeGdb(const AstNode* nodep);  // For GDB only
     void dumpTreeAndNext(std::ostream& os = std::cout, const string& indent = "    ",
                          int maxDepth = 0) const;
-    void dumpTreeFile(const string& filename, bool append = false, bool doDump = true,
-                      bool doCheck = true);
+    void dumpTreeFile(const string& filename, bool doDump = true);
     static void dumpTreeFileGdb(const AstNode* nodep, const char* filenamep = nullptr);
     void dumpTreeDot(std::ostream& os = std::cout) const;
-    void dumpTreeDotFile(const string& filename, bool append = false, bool doDump = true);
+    void dumpTreeDotFile(const string& filename, bool doDump = true);
+    virtual void dumpJson(std::ostream& os) const { dumpJsonGen(os); };  // node-specific fields
+    // Generated by 'astgen'. Dumps node-specific pointers and calls 'dumpJson()' of parent class
+    // Note that we don't make it virtual as it would result in infinite recursion
+    void dumpJsonGen(std::ostream& os) const {};
+    virtual void dumpTreeJsonOpGen(std::ostream& os, const string& indent) const {};
+    void dumpTreeJson(std::ostream& os, const string& indent = "") const;
+    void dumpTreeJsonFile(const string& filename, bool doDump = true);
+    static void dumpJsonMetaFileGdb(const char* filename);
+    static void dumpJsonMetaFile(const string& filename);
+
+    // Render node address for dumps. By default this is just the address
+    // printed as hex, but with --dump-tree-addrids we map addresses to short
+    // strings with a bijection to aid human readability. Observe that this might
+    // not actually be a unique identifier as the address can get reused after a
+    // node has been freed.
+    static std::string nodeAddr(const AstNode* nodep) {
+        return v3Global.opt.dumpTreeAddrids() ? v3Global.ptrToId(nodep) : cvtToHex(nodep);
+    }
 
     // METHODS - static advancement
     static AstNode* afterCommentp(AstNode* nodep) {
@@ -2244,7 +2492,7 @@ public:
     // statement is unlikely to be taken
     virtual bool isUnlikely() const { return false; }
     virtual int instrCount() const { return 0; }
-    // Iff node is identical to anouther node
+    // Iff node is identical to another node
     virtual bool isSame(const AstNode* samep) const {
         return type() == samep->type() && same(samep);
     }
@@ -2260,6 +2508,8 @@ public:
     virtual bool undead() const { return false; }
     // Check if node is consistent, return nullptr if ok, else reason string
     virtual const char* broken() const { return nullptr; }
+    // Generated by 'astgen'. Calls 'broken()', which can be used to add extra checks
+    virtual const char* brokenGen() const = 0;  // Generated by 'astgen'
 
     // INVOKERS
     virtual void accept(VNVisitorConst& v) = 0;
@@ -2281,7 +2531,12 @@ protected:
     // Use instead VNVisitor::iterateSubtreeReturnEdits
     AstNode* iterateSubtreeReturnEdits(VNVisitor& v);
 
-private:
+    static void dumpJsonNum(std::ostream& os, const std::string& name, int64_t val);
+    static void dumpJsonBool(std::ostream& os, const std::string& name, bool val);
+    static void dumpJsonStr(std::ostream& os, const std::string& name, const std::string& val);
+    static void dumpJsonPtr(std::ostream& os, const std::string& name, const AstNode* const valp);
+
+protected:
     void iterateListBackwardsConst(VNVisitorConst& v);
 
     // For internal use only.
@@ -2399,14 +2654,6 @@ private:
     template <typename T_Arg, bool Default, typename Callable>
     inline static bool predicateImpl(ConstCorrectAstNode<T_Arg>* nodep, const Callable& p);
 
-    template <typename T_Callable>
-    struct Arg0NoPointerNoCV final {
-        using Traits = FunctionTraits<T_Callable>;
-        using T_Arg0 = typename Traits::template arg<0>::type;
-        using T_Arg0NoPtr = typename std::remove_pointer<T_Arg0>::type;
-        using type = typename std::remove_cv<T_Arg0NoPtr>::type;
-    };
-
 public:
     // Given a callable 'f' that takes a single argument of some AstNode subtype 'T_Node', traverse
     // the tree rooted at this node, and call 'f' in pre-order on each node that is of type
@@ -2417,7 +2664,7 @@ public:
     // caches in modern CPUs, while it is basically unpredictable for VNVisitor.
     template <typename Callable>
     void foreach(Callable&& f) {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable<Callable, T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Callable 'f' must have a signature compatible with 'void(T_Node*)', "
@@ -2428,7 +2675,7 @@ public:
     // Same as above, but for 'const' nodes
     template <typename Callable>
     void foreach(Callable&& f) const {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable<Callable, const T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Callable 'f' must have a signature compatible with 'void(const T_Node*)', "
@@ -2439,7 +2686,7 @@ public:
     // Same as 'foreach' but also traverses 'this->nextp()' transitively
     template <typename Callable>
     void foreachAndNext(Callable&& f) {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable<Callable, T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Callable 'f' must have a signature compatible with 'void(T_Node*)', "
@@ -2450,7 +2697,7 @@ public:
     // Same as above, but for 'const' nodes
     template <typename Callable>
     void foreachAndNext(Callable&& f) const {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable<Callable, const T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Callable 'f' must have a signature compatible with 'void(const T_Node*)', "
@@ -2465,7 +2712,7 @@ public:
     // be determined.
     template <typename Callable>
     bool exists(Callable&& p) {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable_r<bool, Callable, T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Predicate 'p' must have a signature compatible with 'bool(T_Node*)', "
@@ -2476,7 +2723,7 @@ public:
     // Same as above, but for 'const' nodes
     template <typename Callable>
     bool exists(Callable&& p) const {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable_r<bool, Callable, const T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Predicate 'p' must have a signature compatible with 'bool(const T_Node*)', "
@@ -2490,7 +2737,7 @@ public:
     // in some arbitrary order and is terminated as soon as the result can be determined.
     template <typename Callable>
     bool forall(Callable&& p) {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable_r<bool, Callable, T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Predicate 'p' must have a signature compatible with 'bool(T_Node*)', "
@@ -2501,7 +2748,7 @@ public:
     // Same as above, but for 'const' nodes
     template <typename Callable>
     bool forall(Callable&& p) const {
-        using T_Node = typename Arg0NoPointerNoCV<Callable>::type;
+        using T_Node = typename FunctionArgNoPointerNoCV<Callable, 0>::type;
         static_assert(vlstd::is_invocable_r<bool, Callable, const T_Node*>::value
                           && std::is_base_of<AstNode, T_Node>::value,
                       "Predicate 'p' must have a signature compatible with 'bool(const T_Node*)', "
@@ -2835,5 +3082,7 @@ AstNode* VNVisitor::iterateSubtreeReturnEdits(AstNode* nodep) {
 
 // Inline function definitions need to go last
 #include "V3AstInlines.h"
+void dumpNodeListJson(std::ostream& os, const AstNode* nodep, const std::string& listName,
+                      const string& indent);
 
 #endif  // Guard

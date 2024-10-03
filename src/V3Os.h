@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -43,10 +43,10 @@ public:
     };
     ///< @return file path without repeated separators and ./ prefix
     static string filenameCleanup(const string& filename) VL_PURE;
+    ///< @return extension (.) part of filename
+    static string filenameExt(const string& filename) VL_PURE;
     ///< @return non-directory part of filename
     static string filenameNonDir(const string& filename) VL_PURE;
-    ///< @return non-extensioned (no .) part of filename
-    static string filenameNonExt(const string& filename) VL_PURE;
     ///< @return basename of filename
     static string filenameNonDirExt(const string& filename) VL_PURE;
     ///< @return directory part of filename
@@ -55,6 +55,8 @@ public:
     static string filenameSubstitute(const string& filename);
     ///< @return realpath of filename
     static string filenameRealPath(const string& filename) VL_PURE;
+    ///< @return relative path of filename, relative to base
+    static string filenameRelativePath(const string& filename, const string& base) VL_PURE;
     ///< @return filename is relative
     static bool filenameIsRel(const string& filename) VL_PURE;
 
@@ -63,17 +65,18 @@ public:
 
     // METHODS (directory utilities)
     static void createDir(const string& dirname);
+    static void filesystemFlush(const string& dirname);
+    static void filesystemFlushBuildDir(const string& dirname);
     static void unlinkRegexp(const string& dir, const string& regexp);
 
     // METHODS (random)
     static uint64_t rand64(std::array<uint64_t, 2>& stater);
     static string trueRandom(size_t size) VL_MT_SAFE;
 
-    // METHODS (time & performance)
+    // METHODS (time & performance) (See also VlOs methods)
     static void u_sleep(int64_t usec);  ///< Sleep for a given number of microseconds.
     /// Return wall time since epoch in microseconds, or 0 if not implemented
     static uint64_t timeUsecs();
-    static uint64_t memUsageBytes();  ///< Return memory usage in bytes, or 0 if not implemented
 
     // METHODS (sub command)
     /// Run system command, returns the exit code of the child process.

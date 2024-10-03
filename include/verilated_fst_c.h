@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2001-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2001-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -47,7 +47,7 @@ private:
     friend VerilatedFstBuffer;  // Give the buffer access to the private bits
 
     //=========================================================================
-    // FST specific internals
+    // FST-specific internals
 
     void* m_fst = nullptr;
     std::map<uint32_t, vlFstHandle> m_code2symbol;
@@ -177,7 +177,7 @@ class VerilatedFstBuffer VL_NOT_FINAL {
 
     // Implementations of duck-typed methods for VerilatedTraceBuffer. These are
     // called from only one place (the full* methods), so always inline them.
-    VL_ATTR_ALWINLINE void emitEvent(uint32_t code, const VlEventBase* newval);
+    VL_ATTR_ALWINLINE void emitEvent(uint32_t code);
     VL_ATTR_ALWINLINE void emitBit(uint32_t code, CData newval);
     VL_ATTR_ALWINLINE void emitCData(uint32_t code, CData newval, int bits);
     VL_ATTR_ALWINLINE void emitSData(uint32_t code, SData newval, int bits);
@@ -192,7 +192,7 @@ class VerilatedFstBuffer VL_NOT_FINAL {
 /// Create a FST dump file in C standalone (no SystemC) simulations.
 /// Also derived for use in SystemC simulations.
 
-class VerilatedFstC VL_NOT_FINAL {
+class VerilatedFstC VL_NOT_FINAL : public VerilatedTraceBaseC {
     VerilatedFst m_sptrace;  // Trace file being created
 
     // CONSTRUCTORS
@@ -208,11 +208,14 @@ public:
     // METHODS - User called
 
     /// Return if file is open
-    bool isOpen() const VL_MT_SAFE { return m_sptrace.isOpen(); }
+    bool isOpen() const override VL_MT_SAFE { return m_sptrace.isOpen(); }
     /// Open a new FST file
-    void open(const char* filename) VL_MT_SAFE { m_sptrace.open(filename); }
+    virtual void open(const char* filename) VL_MT_SAFE { m_sptrace.open(filename); }
     /// Close dump
-    void close() VL_MT_SAFE { m_sptrace.close(); }
+    void close() VL_MT_SAFE {
+        m_sptrace.close();
+        modelConnected(false);
+    }
     /// Flush dump
     void flush() VL_MT_SAFE { m_sptrace.flush(); }
     /// Write one cycle of dump data
@@ -230,12 +233,12 @@ public:
 
     // Set time units (s/ms, defaults to ns)
     // Users should not need to call this, as for Verilated models, these
-    // propage from the Verilated default timeunit
+    // propagate from the Verilated default timeunit
     void set_time_unit(const char* unitp) VL_MT_SAFE { m_sptrace.set_time_unit(unitp); }
     void set_time_unit(const std::string& unit) VL_MT_SAFE { m_sptrace.set_time_unit(unit); }
     // Set time resolution (s/ms, defaults to ns)
     // Users should not need to call this, as for Verilated models, these
-    // propage from the Verilated default timeprecision
+    // propagate from the Verilated default timeprecision
     void set_time_resolution(const char* unitp) VL_MT_SAFE {
         m_sptrace.set_time_resolution(unitp);
     }

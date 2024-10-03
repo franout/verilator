@@ -1,4 +1,4 @@
-.. Copyright 2003-2023 by Wilson Snyder.
+.. Copyright 2003-2024 by Wilson Snyder.
 .. SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 *******************
@@ -161,8 +161,8 @@ List Of Warnings
 .. option:: BADSTDPRAGMA
 
    An error that a pragma is badly formed, for pragmas defined by IEEE
-   1800-2017.  For example, an empty pragma line, or an incorrectly used
-   'pragma protect'.  Third-party pragmas not defined by IEEE 1800-2017 are
+   1800-2023.  For example, an empty pragma line, or an incorrectly used
+   'pragma protect'.  Third-party pragmas not defined by IEEE 1800-2023 are
    ignored.
 
 
@@ -210,22 +210,35 @@ List Of Warnings
 
 .. option:: BLKLOOPINIT
 
-   .. TODO better example
-
-   This indicates that the initialization of an array needs to use
-   non-delayed assignments.  This is done in the interest of speed; if
-   delayed assignments were used, the simulator would have to copy large
-   arrays every cycle.  (In smaller loops, loop unrolling allows the
-   delayed assignment to work, though it's a bit slower than a non-delayed
-   assignment.)  Here's an example
+   Indicates certain constructs where non-blocking assignments to unpacked
+   arrays (memories) are not supported inside loops. These typically appear in
+   initialization/reset code:
 
    .. code-block:: sv
 
          always @(posedge clk)
             if (~reset_l)
                 for (i=0; i<`ARRAY_SIZE; i++)
-                    array[i] = 0;  // Non-delayed for verilator
+                    array[i] <= 0;  // Non-blocking assignment inside loop
+            else
+                array[address] <= data;
 
+   While this is supported in typical synthesizeable code (including the
+   example above), some complicated cases are not supported. Namely:
+
+   1. If the above loop is inside a suspendable process or fork statement.
+
+   2. If the variable is also the target of a '<=' non-blocking assignment
+   in a suspendable process or fork statement (in addition to a synthesizable
+   loop).
+
+   3. If the element type of the array is a compound type.
+
+   4. In versions before 5.026, any delayed assignment to an array.
+
+   It might slightly improve run-time performance if you change the
+   non-blocking assignment inside the loop into a blocking assignment
+   (that is: use '=' instead of '<='), if possible.
 
    This message is only seen on large or complicated loops because
    Verilator generally unrolls small loops.  You may want to try increasing
@@ -283,7 +296,7 @@ List Of Warnings
    Unique case statements that select on an enumerated variable, where all
    of the enumerated values are covered by case items, are considered
    complete even if the case statement does not cover illegal
-   non-enumerated values (IEEE 1800-2017 12.5.3).  To check that illegal
+   non-enumerated values (IEEE 1800-2023 12.5.3).  To check that illegal
    values are not hit, use :vlopt:`--assert`.
 
    Ignoring this warning will only suppress the lint check; it will
@@ -406,9 +419,9 @@ List Of Warnings
 
 .. option:: CONSTRAINTIGN
 
-   Warns that Verilator does not support :code:`constraint`,
-   :code:`constraint_mode`, or :code:`rand_mode`, and the construct was are
-   ignored.
+   Warns that Verilator does not support certain forms of
+   :code:`constraint`, :code:`constraint_mode`, or :code:`rand_mode`, and
+   the construct was are ignored.
 
    Ignoring this warning may make Verilator randomize() simulations differ
    from other simulators.
@@ -479,7 +492,7 @@ List Of Warnings
 
    .. code-block::
 
-         %Warning-DEFPARAM: example.v:5:15: defparam is deprecated (IEEE 1800-2017 C.4.1)
+         %Warning-DEFPARAM: example.v:5:15: defparam is deprecated (IEEE 1800-2023 C.4.1)
                                           : ... Suggest use instantiation with #(.MY_PARAM(...etc...))
 
    To repair use :code:`#(.PARAMETER(...))` syntax. Repaired Example:
@@ -707,7 +720,7 @@ List Of Warnings
 
    .. code-block::
 
-         %Warning-GENUNNAMED: example.v:2:9: Unnamed generate block (IEEE 1800-2017 27.6)
+         %Warning-GENUNNAMED: example.v:2:9: Unnamed generate block (IEEE 1800-2023 27.6)
 
    To fix this assign a label (often with the naming convention prefix of
    :code:`gen_` or :code:`g_`), for example:
@@ -763,7 +776,7 @@ List Of Warnings
 
    .. code-block::
 
-         %Warning-IGNOREDRETURN: example.v:5:9: Ignoring return value of non-void function (IEEE 1800-2017 13.4.1)
+         %Warning-IGNOREDRETURN: example.v:5:9: Ignoring return value of non-void function (IEEE 1800-2023 13.4.1)
 
    The portable way to suppress this warning (in SystemVerilog) is to use a
    void cast, for example:
@@ -1204,6 +1217,14 @@ List Of Warnings
    :vlopt:`--no-timing` option.
 
 
+.. option:: NONSTD
+
+   Warns when a non-standard language feature is used that has a standard
+   equivalent, which might behave differently in corner cases. For example
+   :code:`$psprintf` system function is replaced by its standard equivalent
+   :code:`$sformatf`.
+
+
 .. option:: NULLPORT
 
    Warns that a null port was detected in the module definition port
@@ -1243,7 +1264,7 @@ List Of Warnings
 
 .. option:: PINMISSING
 
-   .. TODO better example
+   .. TODO better example (frequent)
 
    Warns that a module has a pin that is not mentioned in an instance.  If
    a pin is not missing it should still be specified on the instance
@@ -1251,6 +1272,22 @@ List Of Warnings
 
    Ignoring this warning will only suppress the lint check; it will
    simulate correctly.
+
+   Faulty example:
+
+   .. include:: ../../docs/gen/ex_PKGNODECL_faulty.rst
+
+   Results in:
+
+   .. include:: ../../docs/gen/ex_PKGNODECL_msg.rst
+
+   Repaired example:
+
+   .. code-block:: sv
+      :emphasize-lines: 2
+
+         sub sub (
+                  .port());
 
    Other tools with similar warnings: Icarus Verilog's portbind, "warning:
    Instantiating module ... with dangling input port (...)". Slang's
@@ -1283,7 +1320,7 @@ List Of Warnings
          generate
             if (A==0) begin
                b b_inst1 (.x(1'b0));  //<--- error nonexistent port
-               b #(.PX(1'b0)) b_inst2 (); //<--- error nonexistent parameter
+               b #(.PX(1'b0)) b_inst2 ();  //<--- error nonexistent parameter
             end
           endgenerate
        endmodule
@@ -1325,11 +1362,47 @@ List Of Warnings
 
 .. option:: PKGNODECL
 
-   .. TODO better example
+   An error that a package/class appears to have been referenced that has
+   not yet been declared.  According to IEEE 1800-2023 26.3, all packages
+   must be declared before being used.
 
-   An error that a package/class appears to have been referenced that has not
-   yet been declared.  According to IEEE 1800-2017 26.3, all packages must
-   be declared before being used.
+   Faulty example:
+
+   .. include:: ../../docs/gen/ex_PKGNODECL_faulty.rst
+
+   Results in:
+
+   .. include:: ../../docs/gen/ex_PKGNODECL_msg.rst
+
+   Often the package is declared in its own header file.  In this case add
+   an include of that package header file to the referencing file.  (And
+   make sure you have header guards in the package's header file to prevent
+   multiple declarations of the package.)
+
+
+.. option:: PREPROCZERO
+
+   Warns that a preprocessor \`ifdef/\`ifndef expression (added in IEEE
+   1800-2023) evaluates a define value which has a value of :code:`0`.
+   This will evaluate in the expression as :code:`1` because the define has
+   a definition, unlike in the C preprocessor, which evaluates using the
+   define's value (of :code:`1`).
+
+   Referring to a define with an empty value does not give this warning, as
+   in C, the preprocessor will give an error on a preprocessor expression
+   of a define that is empty.
+
+   .. code-block:: sv
+      :linenos:
+      :emphasize-lines: 2
+
+       `define ZERO 0
+       `ifdef (ZERO || ZERO)  //<--- warning PREPROCZERO
+        `error This_will_error_which_might_be_not_the_intent
+       `endif
+
+   The portable way to suppress this warning is to use a define value other
+   than zero, when it is to be used in a preprocessor expression.
 
 
 .. option:: PROCASSWIRE
@@ -1707,7 +1780,7 @@ List Of Warnings
 
    .. code-block::
 
-         %Warning-TIMESCALEMOD: example.v:1:8: Timescale missing on this module as other modules have it (IEEE 1800-2017 3.14.2.3)
+         %Warning-TIMESCALEMOD: example.v:1:8: Timescale missing on this module as other modules have it (IEEE 1800-2023 3.14.2.3)
 
    Recommend using :vlopt:`--timescale` argument, or in front of all
    modules use:
@@ -1851,7 +1924,8 @@ List Of Warnings
 
 .. option:: UNPACKED
 
-   Warns that unpacked structs and unions are not supported.
+   Warns that unpacked structs and unions are not supported because
+   :vlopt:`--structs-packed` was used, or by up through version 5.004.
 
    Ignoring this warning will make Verilator treat the structure as packed,
    which may make Verilator simulations differ from other simulators. This
@@ -1902,14 +1976,16 @@ List Of Warnings
 
    .. TODO better example
 
-   Warns that the specified genvar is never used/consumed.
+   Warns that the specified genvar is never used/consumed. See similar
+   :option:`UNUSEDSIGNAL`.
 
 
 .. option:: UNUSEDPARAM
 
    .. TODO better example
 
-   Warns that the specified parameter is never used/consumed.
+   Warns that the specified parameter is never used/consumed. See similar
+   :option:`UNUSEDSIGNAL`.
 
 
 .. option:: UNUSEDSIGNAL
@@ -1949,7 +2025,7 @@ List Of Warnings
 .. option:: USERERROR
 
    A SystemVerilog elaboration-time assertion error was executed.
-   IEEE 1800-2017 20.11 requires this error.
+   IEEE 1800-2023 20.11 requires this error.
 
    Faulty example:
 
@@ -1965,7 +2041,7 @@ List Of Warnings
 .. option:: USERFATAL
 
    A SystemVerilog elaboration-time assertion fatal was executed.
-   IEEE 1800-2017 20.11 requires this error.
+   IEEE 1800-2023 20.11 requires this error.
 
    Faulty example:
 
@@ -1981,7 +2057,7 @@ List Of Warnings
 .. option:: USERINFO
 
    A SystemVerilog elaboration-time assertion print was executed.  This is
-   not an error or warning, and IEEE 1800-2017 20.11 requires this
+   not an error or warning, and IEEE 1800-2023 20.11 requires this
    behavior.
 
    Example:
@@ -1996,7 +2072,7 @@ List Of Warnings
 .. option:: USERWARN
 
    A SystemVerilog elaboration-time assertion warning was executed.
-   IEEE 1800-2017 20.11 requires this warning.
+   IEEE 1800-2023 20.11 requires this warning.
 
    Faulty example:
 
@@ -2032,16 +2108,18 @@ List Of Warnings
 
 .. option:: WAITCONST
 
-   .. code-block:: sv
-
-         wait(1);  // Blocks forever
-
    Warns that a `wait` statement awaits a constant condition, which means it
    either blocks forever or never blocks.
 
    As a special case `wait(0)` with the literal constant `0` (as opposed to
    something that elaborates to zero), does not warn, as it is presumed the
    code is making the intent clear.
+
+   Faulty example:
+
+   .. code-block:: sv
+
+         wait(1);  // Blocks forever
 
 
 .. option:: WIDTH
@@ -2079,7 +2157,7 @@ List Of Warnings
 
    .. include:: ../../docs/gen/ex_WIDTHEXPAND_1_faulty.rst
 
-   Results in a WIDTHEXPAND warning:
+   Results in a :option:`WIDTHEXPAND` warning:
 
    .. include:: ../../docs/gen/ex_WIDTHEXPAND_1_msg.rst
 
@@ -2090,15 +2168,18 @@ List Of Warnings
 
 .. option:: WIDTHTRUNC
 
-   A more granular WIDTH warning, for when a value is truncated.
+   A more granular :option:`WIDTH` warning, for when a value is
+   truncated. See :option:`WIDTH`.
 
 .. option:: WIDTHEXPAND
 
-   A more granular WIDTH warning, for when a value is zero expanded.
+   A more granular :option:`WIDTH` warning, for when a value is zero
+   expanded. See :option:`WIDTH`.
 
 .. option:: WIDTHXZEXPAND
 
-   A more granular WIDTH warning, for when a value is X/Z expanded.
+   A more granular :option:`WIDTH` warning, for when a value is X/Z
+   expanded. See :option:`WIDTH`.
 
 .. option:: WIDTHCONCAT
 
@@ -2131,3 +2212,46 @@ List Of Warnings
    Inactive region. Such processes do get resumed in the same time slot
    somewhere in the Active region. Issued only if Verilator is run with the
    :vlopt:`--timing` option.
+
+.. option:: ZEROREPL
+
+   Warns that zero is used as the replication value in the replication
+   operator. This is specified as an error by IEEE 1800-2023 11.4.12.1.
+
+   Faulty example:
+
+   .. code-block:: sv
+      :linenos:
+      :emphasize-lines: 5
+
+         module dut
+            #(parameter int MY_PARAM = 0);
+           reg [7:0] data;
+           always @* begin
+             data = {MY_PARAM{1'b1}};  //<--- Warning
+           end
+         endmodule
+
+   Results in the following error:
+
+   .. code-block::
+
+       %Error-ZEROREPL: test.v:5:22: Replication value of 0 is only legal under a concatenation (IEEE 1800-2023 11.4.12.1)
+
+   Note that in some cases, this warning may be false, when a condition
+   upstream or downstream of the access means the zero replication will
+   never execute or be used.
+
+   Repaired example:
+
+   .. code-block:: sv
+      :linenos:
+      :emphasize-lines: 2
+
+         module dut
+            #(parameter int MY_PARAM = 1);  //<--- REPAIRED
+           reg [7:0] data;
+           always @* begin
+             data = {MY_PARAM{1'b1}};
+           end
+         endmodule

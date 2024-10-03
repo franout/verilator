@@ -24,15 +24,20 @@ cmake_policy(SET CMP0074 NEW)
 project(cmake_tracing_c)
 
 find_package(verilator HINTS $ENV{VERILATOR_ROOT} ${VERILATOR_ROOT})
-if (NOT verilator_FOUND)
-  message(FATAL_ERROR "Verilator was not found. Either install it, or set the VERILATOR_ROOT environment variable")
+if(NOT verilator_FOUND)
+    message(
+        FATAL_ERROR
+        "Verilator was not found. Either install it, or set the VERILATOR_ROOT environment variable"
+    )
 endif()
 
 # Create a new executable target that will contain all your sources
 add_executable(example ../make_tracing_c/sim_main.cpp)
+target_compile_features(example PUBLIC cxx_std_14)
 
 # Add the Verilated circuit to the target
 verilate(example COVERAGE TRACE
   INCLUDE_DIRS "../make_tracing_c"
   VERILATOR_ARGS -f ../make_tracing_c/input.vc -x-assign fast
-  SOURCES ../make_tracing_c/top.v)
+  SOURCES ../make_tracing_c/top.v
+)

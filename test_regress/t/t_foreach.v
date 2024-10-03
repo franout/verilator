@@ -4,7 +4,8 @@
 // any use, without warranty, 2016 by Wilson Snyder.
 // SPDX-License-Identifier: CC0-1.0
 
-`define checkh(gotv,expv) do if ((gotv) !== (expv)) begin $write("%%Error: %s:%0d:  got='h%x exp='h%x\n", `__FILE__,`__LINE__, (gotv), (expv)); $stop; end while(0);
+`define stop $stop
+`define checkh(gotv,expv) do if ((gotv) !== (expv)) begin $write("%%Error: %s:%0d:  got='h%x exp='h%x\n", `__FILE__,`__LINE__, (gotv), (expv)); `stop; end while(0);
 
 module t (/*AUTOARG*/);
 
@@ -36,7 +37,7 @@ module t (/*AUTOARG*/);
    initial begin
       sum = 0;
       // We use 'index_' as the prefix for all loop vars,
-      // this allows t_foreach.pl to confirm that all loops
+      // this allows t_foreach.py to confirm that all loops
       // have been unrolled and flattened away and no loop vars
       // remain in the generated .cpp
       foreach (depth1_array[index_a]) begin

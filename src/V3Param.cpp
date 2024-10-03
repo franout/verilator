@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -21,6 +21,7 @@
 //              (Interfaces also matter, as if a module is parameterized
 //              this effectively changes the width behavior of all that
 //              reference the iface.)
+//
 //              Clone module cell calls, renaming with __{par1}_{par2}_...
 //              Substitute constants for cell's module's parameters.
 //              Relink pins and cell and ifacerefdtype to point to new module.
@@ -50,6 +51,7 @@
 
 #include "V3Case.h"
 #include "V3Const.h"
+#include "V3EmitV.h"
 #include "V3Hasher.h"
 #include "V3Os.h"
 #include "V3Parse.h"
@@ -64,7 +66,7 @@
 VL_DEFINE_DEBUG_FUNCTIONS;
 
 //######################################################################
-// Hierarchical block and parameter db (modules without parameter is also handled)
+// Hierarchical block and parameter db (modules without parameters are also handled)
 
 class ParameterizedHierBlocks final {
     using HierBlockOptsByOrigName = std::multimap<std::string, const V3HierarchicalBlockOption*>;
@@ -74,6 +76,7 @@ class ParameterizedHierBlocks final {
     using GParamsMap = std::map<const std::string, AstVar*>;  // key:parameter name value:parameter
 
     // MEMBERS
+    const bool m_hierSubRun;  // Is in sub-run for hierarchical verilation
     // key:Original module name, value:HiearchyBlockOption*
     // If a module is parameterized, the module is uniquified to overridden parameters.
     // This is why HierBlockOptsByOrigName is multimap.
@@ -88,7 +91,10 @@ class ParameterizedHierBlocks final {
     // METHODS
 
 public:
-    ParameterizedHierBlocks(const V3HierBlockOptSet& hierOpts, AstNetlist* nodep) {
+    ParameterizedHierBlocks(const V3HierBlockOptSet& hierOpts, AstNetlist* nodep)
+        : m_hierSubRun((!v3Global.opt.hierBlocks().empty() || v3Global.opt.hierChild())
+                       // Exclude consolidation
+                       && !v3Global.opt.hierParamFile().empty()) {
         for (const auto& hierOpt : hierOpts) {
             m_hierBlockOptsByOrigName.emplace(hierOpt.second.origName(), &hierOpt.second);
             const V3HierarchicalBlockOption::ParamStrMap& params = hierOpt.second.params();
@@ -109,7 +115,11 @@ public:
             if (hierOpts.find(modp->prettyName()) != hierOpts.end()) {
                 m_hierBlockMod.emplace(modp->name(), modp);
             }
-            const auto defParamIt = m_modParams.find(modp->name());
+            // Recursive hierarchical module may change its name, so we have to match its origName.
+            // Collect values from recursive cloned module as parameters in the top module could be
+            // overridden.
+            const string actualModName = modp->recursiveClone() ? modp->origName() : modp->name();
+            const auto defParamIt = m_modParams.find(actualModName);
             if (defParamIt != m_modParams.end()) {
                 // modp is the original of parameterized hierarchical block
                 for (AstNode* stmtp = modp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
@@ -120,11 +130,13 @@ public:
             }
         }
     }
+    bool hierSubRun() const { return m_hierSubRun; }
+    bool isHierBlock(const string& origName) const {
+        return m_hierBlockOptsByOrigName.find(origName) != m_hierBlockOptsByOrigName.end();
+    }
     AstNodeModule* findByParams(const string& origName, AstPin* firstPinp,
                                 const AstNodeModule* modp) {
-        if (m_hierBlockOptsByOrigName.find(origName) == m_hierBlockOptsByOrigName.end()) {
-            return nullptr;
-        }
+        UASSERT(isHierBlock(origName), origName << " is not hierarchical block\n");
         // This module is a hierarchical block. Need to replace it by the --lib-create wrapper.
         const std::pair<HierMapIt, HierMapIt> candidates
             = m_hierBlockOptsByOrigName.equal_range(origName);
@@ -138,8 +150,6 @@ public:
             UASSERT(params.size() == hierIt->second->params().size(), "not match");
             for (AstPin* pinp = firstPinp; pinp; pinp = VN_AS(pinp->nextp(), Pin)) {
                 if (!pinp->exprp()) continue;
-                UASSERT_OBJ(!pinp->modPTypep(), pinp,
-                            "module with type parameter must not be a hierarchical block");
                 if (const AstVar* const modvarp = pinp->modVarp()) {
                     AstConst* const constp = VN_AS(pinp->exprp(), Const);
                     UASSERT_OBJ(constp, pinp,
@@ -191,7 +201,7 @@ public:
                 varNum.opIToRD(pinValuep->num());
                 var = varNum.toDouble();
             }
-            return v3EpsilonEqual(var, hierOptParamp->num().toDouble());
+            return V3Number::epsilonEqual(var, hierOptParamp->num().toDouble());
         } else {  // Now integer type is assumed
             // Bitwidth of hierOptParamp is accurate because V3Width already calculated in the
             // previous run. Bitwidth of pinValuep is before width analysis, so pinValuep is casted
@@ -222,10 +232,10 @@ class ParamProcessor final {
     //                          //        (0=not processed, 1=iterated, but no number,
     //                          //         65+ parameter numbered)
     // NODE STATE - Shared with ParamVisitor
-    //   AstClass::user3p()     // AstClass* Unchanged copy of the parameterized class node.
-    //                                    The class node may be modified according to parameter
-    //                                    values and an unchanged copy is needed to instantiate
-    //                                    classes with different parameters.
+    //   AstNodeModule::user3p()  // AstNodeModule* Unaltered copy of the parameterized module.
+    //                               The module/class node may be modified according to parameter
+    //                               values and an unchanged copy is needed to instantiate
+    //                               modules/classes with different parameters.
     //   AstNodeModule::user2() // bool   True if processed
     //   AstGenFor::user2()     // bool   True if processed
     //   AstVar::user2()        // bool   True if constant propagated
@@ -240,7 +250,7 @@ class ParamProcessor final {
 
     // STATE
     using CloneMap = std::unordered_map<const AstNode*, AstNode*>;
-    struct ModInfo {
+    struct ModInfo final {
         AstNodeModule* const m_modp;  // Module with specified name
         CloneMap m_cloneMap;  // Map of old-varp -> new cloned varp
         explicit ModInfo(AstNodeModule* modp)
@@ -267,7 +277,7 @@ class ParamProcessor final {
     // Database to get lib-create wrapper that matches parameters in hierarchical Verilation
     ParameterizedHierBlocks m_hierBlocks;
     // Default parameter values key:parameter name, value:default value (can be nullptr)
-    using DefaultValueMap = std::map<std::string, AstConst*>;
+    using DefaultValueMap = std::map<std::string, AstNode*>;
     // Default parameter values of hierarchical blocks
     std::map<AstNodeModule*, DefaultValueMap> m_defaultParameterValues;
     VNDeleter m_deleter;  // Used to delay deletion of nodes
@@ -334,11 +344,28 @@ class ParamProcessor final {
             key += " ";
             key += paramValueString(dtypep->subDTypep());
         } else if (const AstBasicDType* const dtypep = VN_CAST(nodep, BasicDType)) {
-            if (dtypep->isSigned()) { key += " signed"; }
+            if (dtypep->isSigned()) key += " signed";
             if (dtypep->isRanged()) {
                 key += "[" + cvtToStr(dtypep->left()) + ":" + cvtToStr(dtypep->right()) + "]";
             }
+        } else if (const AstPackArrayDType* const dtypep = VN_CAST(nodep, PackArrayDType)) {
+            key += "[";
+            key += cvtToStr(dtypep->left());
+            key += ":";
+            key += cvtToStr(dtypep->right());
+            key += "] ";
+            key += paramValueString(dtypep->subDTypep());
+        } else if (const AstInitArray* const initp = VN_CAST(nodep, InitArray)) {
+            key += "{";
+            for (auto it : initp->map()) {
+                key += paramValueString(it.second->valuep());
+                key += ",";
+            }
+            key += "}";
+        } else if (const AstNodeDType* const dtypep = VN_CAST(nodep, NodeDType)) {
+            key += dtypep->prettyDTypeName(true);
         }
+        UASSERT_OBJ(!key.empty(), nodep, "Parameter yielded no value string");
         return key;
     }
 
@@ -359,7 +386,7 @@ class ParamProcessor final {
         const auto pair = m_valueMap.emplace(hash, 0);
         if (pair.second) pair.first->second = m_nextValue++;
         num = pair.first->second;
-        return std::string{"z"} + cvtToStr(num);
+        return "z"s + cvtToStr(num);
     }
     string moduleCalcName(const AstNodeModule* srcModp, const string& longname) {
         string newname = longname;
@@ -449,7 +476,7 @@ class ParamProcessor final {
     }
     // Check if parameter setting during instantiation is simple enough for hierarchical Verilation
     void checkSupportedParam(AstNodeModule* modp, AstPin* pinp) const {
-        // InitArray and AstParamTypeDType are not supported because that can not be set via -G
+        // InitArray is not supported because that can not be set via -G
         // option.
         if (pinp->modVarp()) {
             bool supported = false;
@@ -457,13 +484,11 @@ class ParamProcessor final {
                 supported = !constp->isOpaque();
             }
             if (!supported) {
-                pinp->v3error(AstNode::prettyNameQ(modp->origName())
-                              << " has hier_block metacomment, hierarchical Verilation"
-                              << " supports only integer/floating point/string parameters");
+                pinp->v3error(
+                    AstNode::prettyNameQ(modp->origName())
+                    << " has hier_block metacomment, hierarchical Verilation"
+                    << " supports only integer/floating point/string and type param parameters");
             }
-        } else {
-            pinp->v3error(AstNode::prettyNameQ(modp->origName())
-                          << " has hier_block metacomment, but 'parameter type' is not supported");
         }
     }
     bool moduleExists(const string& modName) const {
@@ -479,16 +504,18 @@ class ParamProcessor final {
         //  - Hash the long name to get valid Verilog symbol
         UASSERT_OBJ(modp->hierBlock(), modp, "should be used for hierarchical block");
 
-        std::map<string, AstConst*> pins;
-        for (AstPin* pinp = paramPinsp; pinp; pinp = VN_AS(pinp->nextp(), Pin)) {
+        std::map<string, AstNode*> pins;
+
+        AstPin* pinp = paramPinsp;
+        while (pinp) {
             checkSupportedParam(modp, pinp);
             if (const AstVar* const varp = pinp->modVarp()) {
                 if (!pinp->exprp()) continue;
-                if (varp->isGParam()) {
-                    AstConst* const constp = VN_CAST(pinp->exprp(), Const);
-                    pins.emplace(varp->name(), constp);
-                }
+                if (varp->isGParam()) { pins.emplace(varp->name(), pinp->exprp()); }
+            } else if (VN_IS(pinp->exprp(), BasicDType) || VN_IS(pinp->exprp(), NodeDType)) {
+                pins.emplace(pinp->name(), pinp->exprp());
             }
+            pinp = VN_AS(pinp->nextp(), Pin);
         }
 
         const auto pair = m_defaultParameterValues.emplace(
@@ -505,23 +532,35 @@ class ParamProcessor final {
                         // nullptr means that the parameter is using some default value.
                         params.emplace(varp->name(), constp);
                     }
+                } else if (const AstParamTypeDType* const p = VN_CAST(stmtp, ParamTypeDType)) {
+                    params.emplace(p->name(), p->skipRefp());
                 }
             }
             pair.first->second = std::move(params);
         }
         const auto paramsIt = pair.first;
-        if (paramsIt->second.empty()) return modp->name();  // modp has no parameter
+        if (paramsIt->second.empty()) return modp->origName();  // modp has no parameter
 
-        string longname = modp->name();
+        string longname = modp->origName();
         for (auto&& defaultValue : paramsIt->second) {
             const auto pinIt = pins.find(defaultValue.first);
-            const AstConst* const constp
-                = pinIt == pins.end() ? defaultValue.second : pinIt->second;
+            // If the pin does not have a value assigned, use the default one.
+            const AstNode* const node = pinIt == pins.end() ? defaultValue.second : pinIt->second;
             // This longname is not valid as verilog symbol, but ok, because it will be hashed
             longname += "_" + defaultValue.first + "=";
             // constp can be nullptr
-            if (constp) longname += constp->num().ascii(false);
+
+            if (const AstConst* const p = VN_CAST(node, Const)) {
+                // Treat modules parametrized with the same values but with different type as the
+                // same.
+                longname += p->num().ascii(false);
+            } else if (node) {
+                std::stringstream type;
+                V3EmitV::verilogForTree(node, type);
+                longname += type.str();
+            }
         }
+        UINFO(9, "       module params longname: " << longname << endl);
 
         const auto iter = m_longMap.find(longname);
         if (iter != m_longMap.end()) return iter->second;  // Already calculated
@@ -536,7 +575,7 @@ class ParamProcessor final {
             // Hex string must be a safe suffix for any symbol
             const string hashStr = hashStrGen.digestHex();
             for (string::size_type i = 1; i < hashStr.size(); ++i) {
-                string newName = modp->name();
+                string newName = modp->origName();
                 // Don't use '__' not to be encoded when this module is loaded later by Verilator
                 if (newName.at(newName.size() - 1) != '_') newName += '_';
                 newName += hashStr.substr(0, i);
@@ -586,8 +625,6 @@ class ParamProcessor final {
         newmodp->user2(false);  // We need to re-recurse this module once changed
         newmodp->recursive(false);
         newmodp->recursiveClone(false);
-        // Only the first generation of clone holds this property
-        newmodp->hierBlock(srcModp->hierBlock() && !srcModp->recursiveClone());
         // Recursion may need level cleanups
         if (newmodp->level() <= m_modp->level()) newmodp->level(m_modp->level() + 1);
         if ((newmodp->level() - srcModp->level()) >= (v3Global.opt.moduleRecursionDepth() - 2)) {
@@ -819,7 +856,7 @@ class ParamProcessor final {
         }
     }
 
-    void storeOriginalParams(AstClass* const classp) {
+    void storeOriginalParams(AstNodeModule* const classp) {
         for (AstNode* stmtp = classp->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
             AstNode* originalParamp = nullptr;
             if (AstVar* const varp = VN_CAST(stmtp, Var)) {
@@ -851,24 +888,27 @@ class ParamProcessor final {
         cellInterfaceCleanup(pinsp, srcModpr, longname /*ref*/, any_overrides /*ref*/,
                              ifaceRefRefs /*ref*/);
 
-        if (!any_overrides) {
-            UINFO(8, "Cell parameters all match original values, skipping expansion.\n");
-            // If it's the first use of the default instance, create a copy and store it in user3p.
-            // user3p will also be used to check if the default instance is used.
-            if (!srcModpr->user3p() && VN_IS(srcModpr, Class)) {
-                AstClass* classCopyp = VN_AS(srcModpr, Class)->cloneTree(false);
-                // It is a temporary copy of the original class node, stored in order to create
-                // another instances. It is needed only during class instantiation.
-                m_deleter.pushDeletep(classCopyp);
-                srcModpr->user3p(classCopyp);
-                storeOriginalParams(classCopyp);
-            }
-        } else if (AstNodeModule* const paramedModp
-                   = m_hierBlocks.findByParams(srcModpr->name(), paramsp, m_modp)) {
+        if (m_hierBlocks.hierSubRun() && m_hierBlocks.isHierBlock(srcModpr->origName())) {
+            AstNodeModule* const paramedModp
+                = m_hierBlocks.findByParams(srcModpr->origName(), paramsp, m_modp);
+            UASSERT_OBJ(paramedModp, nodep, "Failed to find sub-module for hierarchical block");
             paramedModp->dead(false);
             // We need to relink the pins to the new module
             relinkPinsByName(pinsp, paramedModp);
             srcModpr = paramedModp;
+            any_overrides = true;
+        } else if (!any_overrides) {
+            UINFO(8, "Cell parameters all match original values, skipping expansion.\n");
+            // If it's the first use of the default instance, create a copy and store it in user3p.
+            // user3p will also be used to check if the default instance is used.
+            if (!srcModpr->user3p() && (VN_IS(srcModpr, Class) || VN_IS(srcModpr, Iface))) {
+                AstNodeModule* nodeCopyp = srcModpr->cloneTree(false);
+                // It is a temporary copy of the original class node, stored in order to create
+                // another instances. It is needed only during class instantiation.
+                m_deleter.pushDeletep(nodeCopyp);
+                srcModpr->user3p(nodeCopyp);
+                storeOriginalParams(nodeCopyp);
+            }
         } else {
             const string newname
                 = srcModpr->hierBlock() ? longname : moduleCalcName(srcModpr, longname);
@@ -890,7 +930,7 @@ class ParamProcessor final {
             if (AstVar* const varp = VN_CAST(stmtp, Var)) {
                 if (VN_IS(srcModpr, Class) && varp->isParam() && !varp->valuep()) {
                     nodep->v3error("Class parameter without initial value is never given value"
-                                   << " (IEEE 1800-2017 6.20.1): " << varp->prettyNameQ());
+                                   << " (IEEE 1800-2023 6.20.1): " << varp->prettyNameQ());
                 }
             }
         }
@@ -908,6 +948,11 @@ class ParamProcessor final {
             nodep->modName(srcModpr->name());
         }
         nodep->recursive(false);
+    }
+
+    void ifaceRefDeparam(AstIfaceRefDType* const nodep, AstNodeModule*& srcModpr) {
+        nodeDeparamCommon(nodep, srcModpr, nodep->paramsp(), nullptr, false);
+        nodep->ifacep(VN_AS(srcModpr, Iface));
     }
 
     void classRefDeparam(AstClassOrPackageRef* nodep, AstNodeModule*& srcModpr) {
@@ -935,10 +980,14 @@ public:
         if (debug() >= 10) nodep->dumpTree("-  cell: ");
         // Evaluate all module constants
         V3Const::constifyParamsEdit(nodep);
-        srcModpr->someInstanceName(someInstanceName + "." + nodep->name());
+        // Set name for warnings for when we param propagate the module
+        const string instanceName = someInstanceName + "." + nodep->name();
+        srcModpr->someInstanceName(instanceName);
 
         if (auto* cellp = VN_CAST(nodep, Cell)) {
             cellDeparam(cellp, srcModpr);
+        } else if (auto* ifaceRefDTypep = VN_CAST(nodep, IfaceRefDType)) {
+            ifaceRefDeparam(ifaceRefDTypep, srcModpr);
         } else if (auto* classRefp = VN_CAST(nodep, ClassRefDType)) {
             classRefDeparam(classRefp, srcModpr);
         } else if (auto* classRefp = VN_CAST(nodep, ClassOrPackageRef)) {
@@ -946,6 +995,9 @@ public:
         } else {
             nodep->v3fatalSrc("Expected module parameterization");
         }
+
+        // Set name for later warnings (if srcModpr changed value due to cloning)
+        srcModpr->someInstanceName(instanceName);
 
         UINFO(8, "     Done with " << nodep << endl);
         // if (debug() >= 10)
@@ -1033,13 +1085,15 @@ class ParamVisitor final : public VNVisitor {
                     if (VN_IS(classRefp->classOrPackageNodep(), ParamTypeDType)) continue;
                 } else if (const auto* classRefp = VN_CAST(cellp, ClassRefDType)) {
                     srcModp = classRefp->classp();
+                } else if (const auto* ifaceRefp = VN_CAST(cellp, IfaceRefDType)) {
+                    srcModp = ifaceRefp->ifacep();
                 } else {
                     cellp->v3fatalSrc("Expected module parameterization");
                 }
                 UASSERT_OBJ(srcModp, cellp, "Unlinked class ref");
 
                 // Update path
-                string someInstanceName(modp->someInstanceName());
+                string someInstanceName = modp->someInstanceName();
                 if (const string* const genHierNamep = cellp->user2u().to<string*>()) {
                     someInstanceName += *genHierNamep;
                     cellp->user2p(nullptr);
@@ -1128,8 +1182,16 @@ class ParamVisitor final : public VNVisitor {
     void visit(AstCell* nodep) override {
         visitCellOrClassRef(nodep, VN_IS(nodep->modp(), Iface));
     }
+    void visit(AstIfaceRefDType* nodep) override {
+        if (nodep->ifacep()) visitCellOrClassRef(nodep, true);
+    }
     void visit(AstClassRefDType* nodep) override { visitCellOrClassRef(nodep, false); }
-    void visit(AstClassOrPackageRef* nodep) override { visitCellOrClassRef(nodep, false); }
+    void visit(AstClassOrPackageRef* nodep) override {
+        // If it points to a typedef it is not really a class reference. That typedef will be
+        // visited anyway (from its parent node), so even if it points to a parameterized class
+        // type, the instance will be created.
+        if (!VN_IS(nodep->classOrPackageNodep(), Typedef)) visitCellOrClassRef(nodep, false);
+    }
 
     // Make sure all parameters are constantified
     void visit(AstVar* nodep) override {
@@ -1138,7 +1200,7 @@ class ParamVisitor final : public VNVisitor {
         if (nodep->isParam()) {
             if (!nodep->valuep() && !VN_IS(m_modp, Class)) {
                 nodep->v3error("Parameter without initial value is never given value"
-                               << " (IEEE 1800-2017 6.20.1): " << nodep->prettyNameQ());
+                               << " (IEEE 1800-2023 6.20.1): " << nodep->prettyNameQ());
             } else {
                 V3Const::constifyParamsEdit(nodep);  // The variable, not just the var->init()
             }
@@ -1304,6 +1366,10 @@ class ParamVisitor final : public VNVisitor {
             // so process here rather than at the generate to avoid iteration problems
             UINFO(9, "  BEGIN " << nodep << endl);
             UINFO(9, "  GENFOR " << forp << endl);
+            // Visit child nodes before unrolling
+            iterateAndNextNull(forp->initsp());
+            iterateAndNextNull(forp->condp());
+            iterateAndNextNull(forp->incsp());
             V3Width::widthParamsEdit(forp);  // Param typed widthing will NOT recurse the body
             // Outer wrapper around generate used to hold genvar, and to ensure genvar
             // doesn't conflict in V3LinkDot resolution with other genvars
@@ -1449,5 +1515,5 @@ public:
 void V3Param::param(AstNetlist* rootp) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { ParamVisitor{rootp}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("param", 0, dumpTreeLevel() >= 6);
+    V3Global::dumpCheckGlobalTree("param", 0, dumpTreeEitherLevel() >= 6);
 }

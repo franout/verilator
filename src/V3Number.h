@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -29,14 +29,6 @@
 #include <cmath>
 #include <limits>
 #include <vector>
-
-//============================================================================
-
-// Return if two numbers within Epsilon of each other
-inline bool v3EpsilonEqual(double a, double b) {
-    return std::fabs(a - b)
-           <= (std::numeric_limits<double>::epsilon() * std::max(1.0, std::max(a, b)));
-}
 
 //============================================================================
 
@@ -456,7 +448,7 @@ public:
 private:
     uint32_t bitsValue(int lsb, int nbits) const VL_MT_SAFE {
         uint32_t v = 0;
-        for (int bitn = 0; bitn < nbits; bitn++) { v |= (bitIs1(lsb + bitn) << bitn); }
+        for (int bitn = 0; bitn < nbits; bitn++) v |= (bitIs1(lsb + bitn) << bitn);
         return v;
     }
 
@@ -533,6 +525,7 @@ public:
     ~V3Number() {}
 
 private:
+    void selfTestThis();
     void create(AstNode* nodep, const char* sourcep) {
         init(nodep, 0);
         m_fileline = nullptr;
@@ -565,6 +558,7 @@ private:
     string displayed(const string& vformat) const VL_MT_STABLE {
         return displayed(m_fileline, vformat);
     }
+    void warnTooMany(const string& value);
 
 public:
     void v3errorEnd(const std::ostringstream& sstr) const VL_RELEASE(V3Error::s().m_mutex);
@@ -581,6 +575,7 @@ public:
     V3Number& setAllBitsZ();
     V3Number& setAllBits0();
     V3Number& setAllBits1();
+    V3Number& setValue1();
     V3Number& setMask(int nbits);  // IE if nbits=1, then 0b1, if 2->0b11, if 3->0b111 etc
 
     // ACCESSORS
@@ -638,6 +633,7 @@ public:
     bool isAnyXZ() const;
     bool isAnyZ() const VL_MT_SAFE;
     bool isMsbXZ() const { return bitIsXZ(m_data.width() - 1); }
+    bool fitsInUInt() const VL_MT_SAFE;
     uint32_t toUInt() const VL_MT_SAFE;
     int32_t toSInt() const VL_MT_SAFE;
     uint64_t toUQuad() const VL_MT_SAFE;
@@ -659,7 +655,11 @@ public:
     bool operator<(const V3Number& rhs) const { return isLtXZ(rhs); }
 
     // STATICS
+    static bool epsilonEqual(double a, double b);  // True if number within Epsilon of the other
+    static bool epsilonIntegral(double a);  // True if number rounds to integer within Epsilon
     static int log2b(uint32_t num);
+    static int log2bQuad(uint64_t num);
+    static void selfTest();
 
     // MATH
     // "this" is the output, as we need the output width before some computations
@@ -667,7 +667,6 @@ public:
     V3Number& opBitsOne(const V3Number& lhs);  // 1->1, 0/X/Z->0
     V3Number& opBitsXZ(const V3Number& lhs);  // 0/1->0, X/Z->1
     V3Number& opBitsZ(const V3Number& lhs);  // Z->1, 0/1/X->0
-    V3Number& opBitsNonZ(const V3Number& lhs);  // Z->0, 0/1/X->1
     //
     V3Number& opAssign(const V3Number& lhs);
     V3Number& opAssignNonXZ(const V3Number& lhs, bool ignoreXZ = true);

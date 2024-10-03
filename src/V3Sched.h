@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -21,7 +21,6 @@
 #include "verilatedos.h"
 
 #include "V3Ast.h"
-#include "V3ThreadSafety.h"
 
 #include <functional>
 #include <unordered_map>
@@ -98,6 +97,8 @@ struct LogicRegions final {
     LogicByScope m_pre;  // AstAssignPre logic in 'act' region
     LogicByScope m_act;  // 'act' region logic
     LogicByScope m_nba;  // 'nba' region logic
+    LogicByScope m_obs;  // AstAlwaysObserved logic in 'obs' region
+    LogicByScope m_react;  // AstAlwaysReactive logic in 're' region
 
     LogicRegions() = default;
     VL_UNCOPYABLE(LogicRegions);
@@ -111,6 +112,8 @@ struct LogicReplicas final {
     LogicByScope m_ico;  // Logic replicated into the 'ico' (Input Combinational) region
     LogicByScope m_act;  // Logic replicated into the 'act' region
     LogicByScope m_nba;  // Logic replicated into the 'nba' region
+    LogicByScope m_obs;  // Logic replicated into the 'obs' region
+    LogicByScope m_react;  // Logic replicated into the 're' region
 
     LogicReplicas() = default;
     VL_UNCOPYABLE(LogicReplicas);
@@ -148,6 +151,27 @@ public:
     TimingKit(TimingKit&&) = default;
     TimingKit& operator=(TimingKit&&) = default;
 };
+
+class VirtIfaceTriggers final {
+    using IfaceTrigger = std::pair<const AstIface*, AstVarScope*>;
+    using IfaceTriggerVec = std::vector<IfaceTrigger>;
+    using IfaceSensMap = std::map<const AstIface*, AstSenTree*>;
+    IfaceTriggerVec m_triggers;
+
+public:
+    void emplace_back(IfaceTrigger&& p) { m_triggers.emplace_back(std::move(p)); }
+    IfaceTriggerVec::const_iterator begin() const { return m_triggers.begin(); }
+    IfaceTriggerVec::const_iterator end() const { return m_triggers.end(); }
+    IfaceSensMap makeIfaceToSensMap(AstNetlist* netlistp, size_t vifTriggerIndex,
+                                    AstVarScope* trigVscp) const;
+    VL_UNCOPYABLE(VirtIfaceTriggers);
+    VirtIfaceTriggers() = default;
+    VirtIfaceTriggers(VirtIfaceTriggers&&) = default;
+    VirtIfaceTriggers& operator=(VirtIfaceTriggers&&) = default;
+};
+
+// Creates trigger vars for signals driven via virtual interfaces
+VirtIfaceTriggers makeVirtIfaceTriggers(AstNetlist* nodep) VL_MT_DISABLED;
 
 // Creates the timing kit and marks variables written by suspendables
 TimingKit prepareTiming(AstNetlist* const netlistp) VL_MT_DISABLED;

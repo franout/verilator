@@ -1,4 +1,4 @@
-.. Copyright 2003-2023 by Wilson Snyder.
+.. Copyright 2003-2024 by Wilson Snyder.
 .. SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 .. _Installation:
@@ -19,12 +19,32 @@ started. (Note packages are unlikely to have the most recent version, so
 :ref:`Git Install` might be a better alternative.) To install as a
 package:
 
-::
+.. code-block:: shell
 
    apt-get install verilator   # On Ubuntu
 
 For other distributions, refer to `Repology Verilator Distro Packages
 <https://repology.org/project/verilator>`__.
+
+.. _pre-commit Quick Install:
+
+pre-commit Quick Install
+=============================
+
+You can use Verilator's `pre-commit <https://pre-commit.com/>`__ hook to
+lint your code before committing it.  It encapsulates the :ref:`Verilator
+Build Docker Container`, so you need docker on your system to use it.  The
+verilator image will be downloaded automatically.
+
+To use the hook, add the following entry to your :code:`.pre-commit-config.yaml`:
+
+.. code-block:: yaml
+
+   repos:
+     - repo: https://github.com/verilator/verilator
+       rev: v5.026  # or later
+       hooks:
+         - id: verilator
 
 .. _Git Install:
 
@@ -36,7 +56,7 @@ options and details, see :ref:`Detailed Build Instructions` below.
 
 In brief, to install from git:
 
-::
+.. code-block:: shell
 
    # Prerequisites:
    #sudo apt-get install git help2man perl python3 make autoconf g++ flex bison ccache
@@ -89,7 +109,7 @@ Install Prerequisites
 
 To build or run Verilator, you need these standard packages:
 
-::
+.. code-block:: shell
 
    sudo apt-get install git help2man perl python3 make
    sudo apt-get install g++  # Alternatively, clang
@@ -101,7 +121,7 @@ To build or run Verilator, you need these standard packages:
 To build or run Verilator, the following are optional but should be installed
 for good performance:
 
-::
+.. code-block:: shell
 
    sudo apt-get install ccache  # If present at build, needed for run
    sudo apt-get install mold  # If present at build, needed for run
@@ -110,26 +130,26 @@ for good performance:
 The following is optional but is recommended for nicely rendered command line
 help when running Verilator:
 
-::
+.. code-block:: shell
 
    sudo apt-get install perl-doc
 
 To build Verilator you will need to install these packages; these do not
 need to be present to run Verilator:
 
-::
+.. code-block:: shell
 
    sudo apt-get install git autoconf flex bison
 
 Those developing Verilator itself may also want these (see internals.rst):
 
-::
+.. code-block:: shell
 
    sudo apt-get install clang clang-format-14 cmake gdb gprof graphviz lcov
-   sudo apt-get install libclang-dev yapf3 bear
-   sudo pip3 install clang sphinx sphinx_rtd_theme sphinxcontrib-spelling breathe ruff
+   sudo apt-get install python3-clang yapf3 bear jq
+   sudo pip3 install sphinx sphinx_rtd_theme sphinxcontrib-spelling breathe ruff
+   sudo pip3 install git+https://github.com/antmicro/astsee.git
    cpan install Pod::Perldoc
-   cpan install Parallel::Forker
 
 
 Install SystemC
@@ -151,6 +171,17 @@ To make use of Verilator FST tracing you will want `GTKwave
 required at Verilator build time.
 
 
+Install Z3
+^^^^^^^^^^
+
+In order to use constrained randomization the `Z3 Theorem Prover
+<https://github.com/z3prover/z3#readme>`__ must be installed, however this is
+not required at Verilator build time. There are other compatible SMT solvers,
+like CVC5/CVC4, but they are not guaranteed to work. Since different solvers are
+faster for different scenarios, the solver to use at run-time can be specified
+by the environment variable :option:`VERILATOR_SOLVER`.
+
+
 .. _Obtain Sources:
 
 Obtain Sources
@@ -159,14 +190,14 @@ Obtain Sources
 Get the sources from the git repository: (You need to do this only once,
 ever.)
 
-::
+.. code-block:: shell
 
    git clone https://github.com/verilator/verilator   # Only first time
    ## Note the URL above is not a page you can see with a browser; it's for git only
 
 Enter the checkout and determine what version/branch to use:
 
-::
+.. code-block:: shell
 
    cd verilator
    git pull        # Make sure we're up-to-date
@@ -181,7 +212,7 @@ Auto Configure
 
 Create the configuration script:
 
-::
+.. code-block:: shell
 
    autoconf        # Create ./configure script
 
@@ -192,8 +223,9 @@ Eventual Installation Options
 Before configuring the build, you must decide how you're going to
 eventually install Verilator onto your system. Verilator will be compiling
 the current value of the environment variables :option:`VERILATOR_ROOT`,
-:option:`SYSTEMC_INCLUDE`, and :option:`SYSTEMC_LIBDIR` as defaults into
-the executable, so they must be correct before configuring.
+:option:`VERILATOR_SOLVER`, :option:`SYSTEMC_INCLUDE`, and
+:option:`SYSTEMC_LIBDIR` as defaults into the executable, so they must be
+correct before configuring.
 
 These are the installation options:
 
@@ -206,7 +238,7 @@ directory (don't run ``make install``). This allows the easiest
 experimentation and upgrading, and allows many versions of Verilator to
 co-exist on a system.
 
-::
+.. code-block:: shell
 
    export VERILATOR_ROOT=`pwd`   # if your shell is bash
    setenv VERILATOR_ROOT `pwd`   # if your shell is csh
@@ -228,7 +260,7 @@ that may support multiple versions of every tool. Tell configure the
 eventual destination directory name.  We recommend that the destination
 location include the Verilator version name:
 
-::
+.. code-block:: shell
 
    unset VERILATOR_ROOT      # if your shell is bash
    unsetenv VERILATOR_ROOT   # if your shell is csh
@@ -240,7 +272,7 @@ the ``bin`` directory to your ``PATH``. Or, if you use `modulecmd
 <http://modules.sourceforge.net/>`__, you'll want a module file like the
 following:
 
-::
+.. code-block:: shell
 
    set install_root /CAD_DISK/verilator/{version-number-used-above}
    unsetenv VERILATOR_ROOT
@@ -255,7 +287,7 @@ following:
 The final option is to eventually install Verilator globally, using
 configure's default system paths:
 
-::
+.. code-block:: shell
 
    unset VERILATOR_ROOT      # if your shell is bash
    unsetenv VERILATOR_ROOT   # if your shell is csh
@@ -272,7 +304,7 @@ The command to configure the package was described in the previous step.
 Developers should configure to have more complete developer tests.
 Additional packages may be required for these tests.
 
-::
+.. code-block:: shell
 
    export VERILATOR_AUTHOR_SITE=1    # Put in your .bashrc
    ./configure --enable-longtests  ...above options...
@@ -283,7 +315,7 @@ Compile
 
 Compile Verilator:
 
-::
+.. code-block:: shell
 
    make -j `nproc`  # Or if error on `nproc`, the number of CPUs in system
 
@@ -293,7 +325,7 @@ Test
 
 Check the compilation by running self-tests:
 
-::
+.. code-block:: shell
 
    make test
 
@@ -305,7 +337,7 @@ If you used any install option other than the `1. Run-in-Place from
 VERILATOR_ROOT <#_1_run_in_place_from_verilator_root>`__ scheme, install
 the files:
 
-::
+.. code-block:: shell
 
    make install
 

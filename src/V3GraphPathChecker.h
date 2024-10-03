@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -20,7 +20,6 @@
 #include "V3Error.h"
 #include "V3Graph.h"
 #include "V3GraphAlg.h"
-#include "V3ThreadSafety.h"
 
 //######################################################################
 
@@ -30,7 +29,7 @@
 ///
 /// The graph (or at least, the subset the algorithm sees through
 /// edgeFuncp) must not change during the lifetime of the checker.
-class GraphPathChecker final : GraphAlg<const V3Graph> {
+class GraphPathChecker final : GraphAlg<V3Graph> {
     // Count "generations" which increases on operations that scan through
     // the graph. Each node is marked with the last generation that scanned
     // it, to enable asserting there are no cycles, and to avoid recursing
@@ -39,9 +38,8 @@ class GraphPathChecker final : GraphAlg<const V3Graph> {
 
 public:
     // CONSTRUCTORS
-    explicit GraphPathChecker(const V3Graph* graphp,
-                              V3EdgeFuncP edgeFuncp
-                              = V3GraphEdge::followAlwaysTrue) VL_MT_DISABLED;
+    explicit GraphPathChecker(V3Graph* graphp, V3EdgeFuncP edgeFuncp
+                                               = V3GraphEdge::followAlwaysTrue) VL_MT_DISABLED;
     ~GraphPathChecker() VL_MT_DISABLED;
 
     // METHODS
@@ -55,7 +53,8 @@ public:
 private:
     bool pathExistsInternal(const V3GraphVertex* ap, const V3GraphVertex* bp,
                             unsigned* costp = nullptr) VL_MT_DISABLED;
-    void initHalfCriticalPaths(GraphWay way, bool checkOnly) VL_MT_DISABLED;
+    template <GraphWay::en T_Way>
+    void initHalfCriticalPaths(bool checkOnly) VL_MT_DISABLED;
     void incGeneration() { ++m_generation; }
 
     VL_UNCOPYABLE(GraphPathChecker);

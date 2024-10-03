@@ -4,16 +4,17 @@
 // any use, without warranty, 2016 by Wilson Snyder.
 // SPDX-License-Identifier: CC0-1.0
 
-`define checkh(gotv,expv) do if ((gotv) !== (expv)) begin $write("%%Error: %s:%0d:  got='h%x exp='h%x\n", `__FILE__,`__LINE__, (gotv), (expv)); $stop; end while(0);
+`define stop $stop
+`define checkh(gotv,expv) do if ((gotv) !== (expv)) begin $write("%%Error: %s:%0d:  got='h%x exp='h%x\n", `__FILE__,`__LINE__, (gotv), (expv)); `stop; end while(0);
 
 module t (/*AUTOARG*/
    // Inputs
    clk
    );
    input clk;
-   sub #(.IDX(0), .CHK(10)) i0;
-   sub #(.IDX(2), .CHK(12)) i2;
-   sub #(.IDX(7), .CHK(17)) i7;
+   sub #(.IDX(0), .CHK(10)) i0();
+   sub #(.IDX(2), .CHK(12)) i2();
+   sub #(.IDX(7), .CHK(17)) i7();
    always @ (posedge clk) begin
       $write("*-* All Finished *-*\n");
       $finish;

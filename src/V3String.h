@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -90,9 +90,9 @@ public:
     // Return {a}{dot}{b}, omitting dot if a or b are empty
     static string dot(const string& a, const string& dot, const string& b);
     // Convert string to lowercase (tolower)
-    static string downcase(const string& str);
+    static string downcase(const string& str) VL_PURE;
     // Convert string to upper case (toupper)
-    static string upcase(const string& str);
+    static string upcase(const string& str) VL_PURE;
     // Insert esc just before tgt
     static string quoteAny(const string& str, char tgt, char esc);
     // Replace any \'s with \\  (two consecutive backslashes)
@@ -174,7 +174,7 @@ public:
     uint64_t digestUInt64();  // Return 64-bits of digest
     static void selfTest();  // Test this class
 
-    // Inerting hash data
+    // Inserting hash data
     void insert(const void* datap, size_t length);  // Process data into the digest
     void insert(const string& data) {
         insert(data.data(), data.length());
@@ -250,7 +250,7 @@ public:
         if (candidate.empty()) {
             return "";
         } else {
-            return std::string{"... Suggested alternative: '"} + candidate + "'";
+            return "... Suggested alternative: '"s + candidate + "'";
         }
     }
     static void selfTest();

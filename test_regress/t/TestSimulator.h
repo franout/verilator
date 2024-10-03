@@ -1,7 +1,7 @@
 // -*- mode: C++; c-file-style: "cc-mode" -*-
 //*************************************************************************
 //
-// Copyright 2013-2023 by Wilson Snyder. This program is free software; you can
+// Copyright 2013-2024 by Wilson Snyder. This program is free software; you can
 // redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -81,4 +81,5 @@ public:
     }
 };
 
-#define VPI_HANDLE(signal) vpi_handle_by_name((PLI_BYTE8*)TestSimulator::rooted(signal), NULL);
+#define VPI_HANDLE(signal) \
+    vpi_handle_by_name(const_cast<PLI_BYTE8*>(TestSimulator::rooted(signal)), nullptr);

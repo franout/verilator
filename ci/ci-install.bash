@@ -27,12 +27,6 @@ fatal() {
   echo "ERROR: $(basename "$0"): $1" >&2; exit 1;
 }
 
-if [ "$CI_M32" = "0" ]; then
-  unset CI_M32
-elif [ "$CI_M32" != "1" ]; then
-  fatal "\$CI_M32 must be '0' or '1'";
-fi
-
 if [ "$CI_OS_NAME" = "linux" ]; then
   MAKE=make
 elif [ "$CI_OS_NAME" = "osx" ]; then
@@ -66,20 +60,13 @@ if [ "$CI_BUILD_STAGE_NAME" = "build" ]; then
       sudo apt-get install libgoogle-perftools-dev ||
       sudo apt-get install libgoogle-perftools-dev
     fi
-    if [ "$CI_RUNS_ON" = "ubuntu-20.04" ] || [ "$CI_RUNS_ON" = "ubuntu-22.04" ]; then
+    if [ "$CI_RUNS_ON" = "ubuntu-20.04" ] || [ "$CI_RUNS_ON" = "ubuntu-22.04" ] || [ "$CI_RUNS_ON" = "ubuntu-24.04" ]; then
       sudo apt-get install libsystemc libsystemc-dev ||
       sudo apt-get install libsystemc libsystemc-dev
     fi
-    if [ "$CI_RUNS_ON" = "ubuntu-22.04" ]; then
+    if [ "$CI_RUNS_ON" = "ubuntu-22.04" ] || [ "$CI_RUNS_ON" = "ubuntu-24.04" ]; then
       sudo apt-get install bear mold ||
       sudo apt-get install bear mold
-    fi
-    if [ "$COVERAGE" = 1 ]; then
-      yes yes | sudo cpan -fi Parallel::Forker
-    fi
-    if [ "$CI_M32" = 1 ]; then
-      sudo apt-get install gcc-multilib g++-multilib ||
-      sudo apt-get install gcc-multilib g++-multilib
     fi
   elif [ "$CI_OS_NAME" = "osx" ]; then
     brew update
@@ -102,38 +89,31 @@ elif [ "$CI_BUILD_STAGE_NAME" = "test" ]; then
     sudo apt-get update ||
     sudo apt-get update
     # libfl-dev needed for internal coverage's test runs
-    sudo apt-get install gdb gtkwave lcov libfl-dev ccache ||
-    sudo apt-get install gdb gtkwave lcov libfl-dev ccache
-    # Required for test_regress/t/t_dist_attributes.pl
-    if [ "$CI_RUNS_ON" = "ubuntu-22.04" ]; then
-      sudo apt-get install libclang-dev mold ||
-      sudo apt-get install libclang-dev mold
-      pip3 install clang==14.0
+    sudo apt-get install gdb gtkwave lcov libfl-dev ccache jq z3 ||
+    sudo apt-get install gdb gtkwave lcov libfl-dev ccache jq z3
+    # Required for test_regress/t/t_dist_attributes.py
+    if [ "$CI_RUNS_ON" = "ubuntu-22.04" ] || [ "$CI_RUNS_ON" = "ubuntu-24.04" ]; then
+      sudo apt-get install python3-clang mold ||
+      sudo apt-get install python3-clang mold
     fi
-    if [ "$CI_RUNS_ON" = "ubuntu-20.04" ] || [ "$CI_RUNS_ON" = "ubuntu-22.04" ]; then
+    if [ "$CI_RUNS_ON" = "ubuntu-20.04" ] || [ "$CI_RUNS_ON" = "ubuntu-22.04" ] || [ "$CI_RUNS_ON" = "ubuntu-24.04" ]; then
       sudo apt-get install libsystemc-dev ||
       sudo apt-get install libsystemc-dev
-    fi
-    if [ "$CI_M32" = 1 ]; then
-      sudo apt-get install lib32z1-dev gcc-multilib g++-multilib ||
-      sudo apt-get install lib32z1-dev gcc-multilib g++-multilib
     fi
   elif [ "$CI_OS_NAME" = "osx" ]; then
     brew update
     # brew cask install gtkwave # fst2vcd hangs at launch, so don't bother
-    brew install ccache perl
+    brew install ccache perl jq z3
   elif [ "$CI_OS_NAME" = "freebsd" ]; then
     # fst2vcd fails with "Could not open '<input file>', exiting."
-    sudo pkg install -y ccache gmake perl5 python3
+    sudo pkg install -y ccache gmake perl5 python3 jq z3
   else
     fatal "Unknown os: '$CI_OS_NAME'"
   fi
   # Common installs
-  if [ "$CI_RUNS_ON" != "ubuntu-14.04" ]; then
-    CI_CPAN_REPO=https://cpan.org
-  fi
-  yes yes | sudo cpan -M $CI_CPAN_REPO -fi Parallel::Forker
   install-vcddiff
+  # Workaround -fsanitize=address crash
+  sudo sysctl -w vm.mmap_rnd_bits=28
 else
   ##############################################################################
   # Unknown build stage

@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -81,8 +81,7 @@ public:
 
     // Emit Prefix adjustments to unwind the path back to its original state
     void unwind() {
-        unsigned toPop = m_stack.size() - 1;
-        while (toPop--) m_emit(new AstTracePopPrefix{m_flp});
+        for (unsigned toPop = m_stack.size(); --toPop;) m_emit(new AstTracePopPrefix{m_flp});
     }
 };
 
@@ -90,7 +89,6 @@ public:
 // TraceDecl state, as a visitor of each AstNode
 
 class TraceDeclVisitor final : public VNVisitor {
-private:
     // NODE STATE
 
     // STATE
@@ -99,6 +97,7 @@ private:
 
     std::vector<AstCFunc*> m_topFuncps;  // Top level trace initialization functions
     std::vector<AstCFunc*> m_subFuncps;  // Trace sub functions for this scope
+    std::set<const AstTraceDecl*> m_declUncalledps;  // Declarations not called
     int m_topFuncSize = 0;  // Size of the top function currently being built
     int m_subFuncSize = 0;  // Size of the sub function currently being built
     const int m_funcSizeLimit  // Maximum size of a function
@@ -174,7 +173,7 @@ private:
         } else if (!nodep->isTrace()) {
             return "Verilator instance trace_off";
         } else {
-            const string prettyName = varp->prettyName();
+            const string prettyName = nodep->prettyName();
             if (!v3Global.opt.traceUnderscore()) {
                 if (!prettyName.empty() && prettyName[0] == '_') return "Leading underscore";
                 if (prettyName.find("._") != string::npos) return "Inlined leading underscore";
@@ -233,15 +232,16 @@ private:
         } else if (const AstBasicDType* const bdtypep = m_traValuep->dtypep()->basicp()) {
             bitRange = bdtypep->nrange();
         }
-        auto* const newp
+        AstTraceDecl* const newp
             = new AstTraceDecl{m_traVscp->fileline(),         m_traName, m_traVscp->varp(),
                                m_traValuep->cloneTree(false), bitRange,  arrayRange};
+        m_declUncalledps.emplace(newp);
         addToSubFunc(newp);
     }
 
     void addIgnore(const char* why) {
         ++m_statIgnSigs;
-        std::string cmt = std::string{"Tracing: "} + m_traName + " // Ignored: " + why;
+        std::string cmt = "Tracing: "s + m_traName + " // Ignored: " + why;
         if (debug() > 3 && m_traVscp) std::cout << "- " << m_traVscp->fileline() << cmt << endl;
     }
 
@@ -259,11 +259,12 @@ private:
             const size_t pos = path.rfind('.');
             const std::string name = path.substr(pos == string::npos ? 0 : pos + 1);
 
-            // Compute the type of the scope beign fixed up
-            AstNodeModule* const modp = scopep->aboveCellp()->modp();
-            const VTracePrefixType scopeType = VN_IS(modp, Iface)
-                                                   ? VTracePrefixType::SCOPE_INTERFACE
-                                                   : VTracePrefixType::SCOPE_MODULE;
+            // Compute the type of the scope being fixed up
+            const AstCell* const cellp = scopep->aboveCellp();
+            const VTracePrefixType scopeType
+                = cellp ? (VN_IS((cellp->modp()), Iface) ? VTracePrefixType::SCOPE_INTERFACE
+                                                         : VTracePrefixType::SCOPE_MODULE)
+                        : VTracePrefixType::SCOPE_MODULE;
 
             // Push the scope prefix
             AstNodeStmt* const pushp = new AstTracePushPrefix{flp, name, scopeType};
@@ -289,6 +290,7 @@ private:
 
     void fixupPlaceholders() {
         // Fix up cell initialization placehodlers
+        UINFO(9, "fixupPlaceholders()\n");
         for (const auto& item : m_cellInitPlaceholders) {
             const AstScope* const parentp = std::get<0>(item);
             const AstCell* const cellp = std::get<1>(item);
@@ -311,7 +313,7 @@ private:
             for (AstCFunc* const funcp : pair.second) {
                 AstNode* prevp = nullptr;
                 AstNode* currp = funcp->stmtsp();
-                while (true) {
+                while (currp) {
                     AstNode* const nextp = currp->nextp();
                     if (VN_IS(prevp, TracePushPrefix) && VN_IS(currp, TracePopPrefix)) {
                         VL_DO_DANGLING(prevp->unlinkFrBack()->deleteTree(), prevp);
@@ -325,8 +327,27 @@ private:
         }
     }
 
+    void checkCalls(const AstCFunc* funcp) {
+        if (!v3Global.opt.debugCheck()) return;
+        checkCallsRecurse(funcp);
+        if (!m_declUncalledps.empty()) {
+            for (auto tracep : m_declUncalledps) UINFO(0, "-nodep " << tracep << "\n");
+            (*(m_declUncalledps.begin()))->v3fatalSrc("Created TraceDecl which is never called");
+        }
+    }
+    void checkCallsRecurse(const AstCFunc* funcp) {
+        funcp->foreach([this](const AstNode* nodep) {
+            if (const AstTraceDecl* const declp = VN_CAST(nodep, TraceDecl)) {
+                m_declUncalledps.erase(declp);
+            } else if (const AstCCall* const ccallp = VN_CAST(nodep, CCall)) {
+                checkCallsRecurse(ccallp->funcp());
+            }
+        });
+    }
+
     // VISITORS
     void visit(AstScope* nodep) override {
+        UINFO(9, "visit " << nodep << "\n");
         UASSERT_OBJ(!m_currScopep, nodep, "Should not nest");
         UASSERT_OBJ(m_subFuncps.empty(), nodep, "Should not nest");
         UASSERT_OBJ(m_entries.empty(), nodep, "Should not nest");
@@ -342,7 +363,7 @@ private:
 
         // Gather cells under this scope
         for (AstNode* stmtp = nodep->modp()->stmtsp(); stmtp; stmtp = stmtp->nextp()) {
-            if (AstCell* const cellp = VN_CAST(stmtp, Cell)) { m_entries.emplace_back(cellp); }
+            if (AstCell* const cellp = VN_CAST(stmtp, Cell)) m_entries.emplace_back(cellp);
         }
 
         if (!m_entries.empty()) {
@@ -391,9 +412,8 @@ private:
                 } else {
                     // This is a subscope: insert a placeholder to be fixed up later
                     AstCell* const cellp = entry.cellp();
-                    FileLine* const flp = cellp->fileline();
-                    AstNodeStmt* const stmtp
-                        = new AstComment{flp, "Cell init for: " + cellp->prettyName()};
+                    AstNodeStmt* const stmtp = new AstComment{
+                        cellp->fileline(), "Cell init for: " + cellp->prettyName()};
                     addToSubFunc(stmtp);
                     m_cellInitPlaceholders.emplace_back(nodep, cellp, stmtp);
                 }
@@ -427,7 +447,7 @@ private:
 
                 // Assume only references under the same parent scope reference
                 // the same interface.
-                // TODO: This is not actually correct. An inteface can propagate
+                // TODO: This is not actually correct. An interface can propagate
                 //       upwards and sideways when passed to a port via a downward
                 //       hierarchical reference, which we will miss here.
                 if (!VString::startsWith(refName, parentPath)) continue;
@@ -679,6 +699,8 @@ public:
         // Set name of top level function
         AstCFunc* const topFuncp = m_topFuncps.front();
         topFuncp->name("trace_init_top");
+
+        checkCalls(topFuncp);
     }
     ~TraceDeclVisitor() override {
         V3Stats::addStat("Tracing, Traced signals", m_statSigs);
@@ -692,5 +714,5 @@ public:
 void V3TraceDecl::traceDeclAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { TraceDeclVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("tracedecl", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("tracedecl", 0, dumpTreeEitherLevel() >= 3);
 }

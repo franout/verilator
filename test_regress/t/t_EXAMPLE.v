@@ -13,7 +13,7 @@
 // please note it here, otherwise:**
 //
 // This file ONLY is placed under the Creative Commons Public Domain, for
-// any use, without warranty, 2023 by Wilson Snyder.
+// any use, without warranty, 2024 by Wilson Snyder.
 // SPDX-License-Identifier: CC0-1.0
 
 module t(/*AUTOARG*/
@@ -45,7 +45,7 @@ module t(/*AUTOARG*/
    wire [63:0] result = {32'h0, out};
 
    // Test loop
-   always @ (posedge clk) begin
+   always @(posedge clk) begin
 `ifdef TEST_VERBOSE
       $write("[%0t] cyc==%0d crc=%x result=%x\n", $time, cyc, crc, result);
 `endif

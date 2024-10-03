@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -76,7 +76,7 @@ public:
     ~TraceActivityVertex() override = default;
     // ACCESSORS
     AstNode* insertp() const {
-        if (!m_insertp) v3fatalSrc("Null insertp; probably called on a special always/slow.");
+        UASSERT(m_insertp, "Null insertp; probably called on a special always/slow");
         return m_insertp;
     }
     string name() const override {
@@ -156,7 +156,6 @@ public:
 // Trace state, as a visitor of each AstNode
 
 class TraceVisitor final : public VNVisitor {
-private:
     // NODE STATE
     // V3Hasher in V3DupFinder
     //  Ast*::user4()                   // V3Hasher calculation
@@ -176,6 +175,7 @@ private:
     AstScope* const m_topScopep = v3Global.rootp()->topScopep()->scopep();  // The top AstScope
     AstCFunc* m_cfuncp = nullptr;  // C function adding to graph
     AstCFunc* m_regFuncp = nullptr;  // Trace registration function
+    AstCFunc* m_actAllFuncp = nullptr;  // Set all activity function
     AstTraceDecl* m_tracep = nullptr;  // Trace function adding to graph
     AstVarScope* m_activityVscp = nullptr;  // Activity variable
     uint32_t m_activityNumber = 0;  // Count of fields in activity variable
@@ -188,8 +188,10 @@ private:
     const uint32_t m_parallelism
         = v3Global.opt.useTraceParallel() ? static_cast<uint32_t>(v3Global.opt.threads()) : 1;
 
-    VDouble0 m_statUniqSigs;  // Statistic tracking
+    VDouble0 m_statSetters;  // Statistic tracking
+    VDouble0 m_statSettersSlow;  // Statistic tracking
     VDouble0 m_statUniqCodes;  // Statistic tracking
+    VDouble0 m_statUniqSigs;  // Statistic tracking
 
     // All activity numbers applying to a given trace
     using ActCodeSet = std::set<uint32_t>;
@@ -202,40 +204,24 @@ private:
         UINFO(9, "Finding duplicates\n");
         // Note uses user4
         V3DupFinder dupFinder;  // Duplicate code detection
-        // Hash all of the values the traceIncs need
-        for (const V3GraphVertex* itp = m_graph.verticesBeginp(); itp;
-             itp = itp->verticesNextp()) {
-            if (const TraceTraceVertex* const vvertexp = itp->cast<const TraceTraceVertex>()) {
+        // Hash all of the traced values and find if there are any duplicates
+        for (V3GraphVertex& vtx : m_graph.vertices()) {
+            if (TraceTraceVertex* const vvertexp = vtx.cast<TraceTraceVertex>()) {
                 const AstTraceDecl* const nodep = vvertexp->nodep();
-                if (nodep->valuep()) {
-                    UASSERT_OBJ(nodep->valuep()->backp() == nodep, nodep,
-                                "Trace duplicate back needs consistency,"
-                                " so we can map duplicates back to TRACEINCs");
-                    // Just keep one node in the map and point all duplicates to this node
-                    if (dupFinder.findDuplicate(nodep->valuep()) == dupFinder.end()) {
-                        dupFinder.insert(nodep->valuep());
-                    }
-                }
-            }
-        }
-        // Find if there are any duplicates
-        for (V3GraphVertex* itp = m_graph.verticesBeginp(); itp; itp = itp->verticesNextp()) {
-            if (TraceTraceVertex* const vvertexp = itp->cast<TraceTraceVertex>()) {
-                const AstTraceDecl* const nodep = vvertexp->nodep();
-                if (nodep->valuep() && !vvertexp->duplicatep()) {
-                    const auto dupit = dupFinder.findDuplicate(nodep->valuep());
-                    if (dupit != dupFinder.end()) {
-                        const AstTraceDecl* const dupDeclp
-                            = VN_AS(dupit->second->backp(), TraceDecl);
-                        UASSERT_OBJ(dupDeclp, nodep, "Trace duplicate of wrong type");
-                        TraceTraceVertex* const dupvertexp
-                            = dupDeclp->user1u().toGraphVertex()->cast<TraceTraceVertex>();
-                        UINFO(8, "  Orig " << nodep << endl);
-                        UINFO(8, "   dup " << dupDeclp << endl);
-                        // Mark the hashed node as the original and our
-                        // iterating node as duplicated
-                        vvertexp->duplicatep(dupvertexp);
-                    }
+                UASSERT_OBJ(!vvertexp->duplicatep(), nodep, "Should not be a duplicate");
+                const auto dupit = dupFinder.findDuplicate(nodep->valuep());
+                if (dupit == dupFinder.end()) {
+                    dupFinder.insert(nodep->valuep());
+                } else {
+                    const AstTraceDecl* const dupDeclp = VN_AS(dupit->second->backp(), TraceDecl);
+                    UASSERT_OBJ(dupDeclp, nodep, "Trace duplicate of wrong type");
+                    TraceTraceVertex* const dupvertexp
+                        = dupDeclp->user1u().toGraphVertex()->cast<TraceTraceVertex>();
+                    UINFO(8, "  Orig " << nodep << endl);
+                    UINFO(8, "   dup " << dupDeclp << endl);
+                    // Mark the hashed node as the original and our
+                    // iterating node as duplicated
+                    vvertexp->duplicatep(dupvertexp);
                 }
             }
         }
@@ -244,9 +230,8 @@ private:
     void graphSimplify(bool initial) {
         if (initial) {
             // Remove all variable nodes
-            for (V3GraphVertex *nextp, *itp = m_graph.verticesBeginp(); itp; itp = nextp) {
-                nextp = itp->verticesNextp();
-                if (TraceVarVertex* const vvertexp = itp->cast<TraceVarVertex>()) {
+            for (V3GraphVertex* const vtxp : m_graph.vertices().unlinkable()) {
+                if (TraceVarVertex* const vvertexp = vtxp->cast<TraceVarVertex>()) {
                     vvertexp->rerouteEdges(&m_graph);
                     vvertexp->unlinkDelete(&m_graph);
                 }
@@ -256,9 +241,8 @@ private:
             // expansion.
             m_graph.removeRedundantEdgesMax(&V3GraphEdge::followAlwaysTrue);
             // Remove all Cfunc nodes
-            for (V3GraphVertex *nextp, *itp = m_graph.verticesBeginp(); itp; itp = nextp) {
-                nextp = itp->verticesNextp();
-                if (TraceCFuncVertex* const vvertexp = itp->cast<TraceCFuncVertex>()) {
+            for (V3GraphVertex* const vtxp : m_graph.vertices().unlinkable()) {
+                if (TraceCFuncVertex* const vvertexp = vtxp->cast<TraceCFuncVertex>()) {
                     vvertexp->rerouteEdges(&m_graph);
                     vvertexp->unlinkDelete(&m_graph);
                 }
@@ -269,44 +253,42 @@ private:
         m_graph.removeRedundantEdgesMax(&V3GraphEdge::followAlwaysTrue);
 
         // If there are any edges from a always, keep only the always
-        for (const V3GraphVertex* itp = m_graph.verticesBeginp(); itp;
-             itp = itp->verticesNextp()) {
-            if (const TraceTraceVertex* const vvertexp = itp->cast<const TraceTraceVertex>()) {
+        for (V3GraphVertex& vtx : m_graph.vertices()) {
+            if (TraceTraceVertex* const vvertexp = vtx.cast<TraceTraceVertex>()) {
                 // Search for the incoming always edge
                 const V3GraphEdge* alwaysEdgep = nullptr;
-                for (const V3GraphEdge* edgep = vvertexp->inBeginp(); edgep;
-                     edgep = edgep->inNextp()) {
+                for (const V3GraphEdge& edge : vvertexp->inEdges()) {
                     const TraceActivityVertex* const actVtxp
-                        = edgep->fromp()->as<const TraceActivityVertex>();
+                        = edge.fromp()->as<const TraceActivityVertex>();
                     if (actVtxp->activityAlways()) {
-                        alwaysEdgep = edgep;
+                        alwaysEdgep = &edge;
                         break;
                     }
                 }
                 // If always edge exists, remove all other edges
                 if (alwaysEdgep) {
-                    for (V3GraphEdge *nextp, *edgep = vvertexp->inBeginp(); edgep; edgep = nextp) {
-                        nextp = edgep->inNextp();
-                        if (edgep != alwaysEdgep) edgep->unlinkDelete();
+                    for (V3GraphEdge* const edgep : vvertexp->inEdges().unlinkable()) {
+                        if (edgep != alwaysEdgep) VL_DO_DANGLING(edgep->unlinkDelete(), edgep);
                     }
                 }
             }
         }
 
         // Activity points with no outputs can be removed
-        for (V3GraphVertex *nextp, *itp = m_graph.verticesBeginp(); itp; itp = nextp) {
-            nextp = itp->verticesNextp();
-            if (TraceActivityVertex* const vtxp = itp->cast<TraceActivityVertex>()) {
+        for (V3GraphVertex* const vtxp : m_graph.vertices().unlinkable()) {
+            if (TraceActivityVertex* const aVtxp = vtxp->cast<TraceActivityVertex>()) {
                 // Leave in the always vertex for later use.
-                if (vtxp != m_alwaysVtxp && !vtxp->outBeginp()) vtxp->unlinkDelete(&m_graph);
+                if (aVtxp != m_alwaysVtxp && aVtxp->outEmpty()) {
+                    VL_DO_DANGLING(aVtxp->unlinkDelete(&m_graph), aVtxp);
+                }
             }
         }
     }
 
     uint32_t assignactivityNumbers() {
         uint32_t activityNumber = 1;  // Note 0 indicates "slow" only
-        for (V3GraphVertex* itp = m_graph.verticesBeginp(); itp; itp = itp->verticesNextp()) {
-            if (TraceActivityVertex* const vvertexp = itp->cast<TraceActivityVertex>()) {
+        for (V3GraphVertex& vtx : m_graph.vertices()) {
+            if (TraceActivityVertex* const vvertexp = vtx.cast<TraceActivityVertex>()) {
                 if (vvertexp != m_alwaysVtxp) {
                     if (vvertexp->slow()) {
                         vvertexp->activityCode(TraceActivityVertex::ACTIVITY_SLOW);
@@ -323,15 +305,14 @@ private:
         // Populate sort structure
         traces.clear();
         nNonConstCodes = 0;
-        for (V3GraphVertex* itp = m_graph.verticesBeginp(); itp; itp = itp->verticesNextp()) {
-            if (TraceTraceVertex* const vtxp = itp->cast<TraceTraceVertex>()) {
+        for (V3GraphVertex& vtx : m_graph.vertices()) {
+            if (TraceTraceVertex* const vtxp = vtx.cast<TraceTraceVertex>()) {
                 ActCodeSet actSet;
                 UINFO(9, "  Add to sort: " << vtxp << endl);
                 if (debug() >= 9) vtxp->nodep()->dumpTree("-   trnode: ");
-                for (const V3GraphEdge* edgep = vtxp->inBeginp(); edgep;
-                     edgep = edgep->inNextp()) {
+                for (const V3GraphEdge& edge : vtxp->inEdges()) {
                     const TraceActivityVertex* const cfvertexp
-                        = edgep->fromp()->cast<const TraceActivityVertex>();
+                        = edge.fromp()->cast<const TraceActivityVertex>();
                     UASSERT_OBJ(cfvertexp, vtxp->nodep(),
                                 "Should have been function pointing to this trace");
                     UINFO(9, "   Activity: " << cfvertexp << endl);
@@ -417,25 +398,32 @@ private:
         return new AstArraySel(flp, new AstVarRef{flp, m_activityVscp, access}, acode);
     }
 
-    void addActivitySetter(AstNode* insertp, uint32_t code) {
+    AstNode* newActivitySetter(AstNode* insertp, uint32_t code) {
+        ++m_statSetters;
         FileLine* const fl = insertp->fileline();
         AstAssign* const setterp = new AstAssign{fl, selectActivity(fl, code, VAccess::WRITE),
                                                  new AstConst{fl, AstConst::BitTrue{}}};
-        if (AstStmtExpr* const stmtp = VN_CAST(insertp, StmtExpr)) {
-            stmtp->addNextHere(setterp);
-        } else if (AstCFunc* const funcp = VN_CAST(insertp, CFunc)) {
-            // If there are awaits, insert the setter after each await
-            if (funcp->isCoroutine() && funcp->stmtsp()) {
-                funcp->stmtsp()->foreachAndNext([&](AstCAwait* awaitp) {
-                    AstNode* stmtp = awaitp->backp();
-                    while (VN_IS(stmtp, NodeExpr)) stmtp = stmtp->backp();
-                    stmtp->addNextHere(setterp->cloneTree(false));
-                });
+        return setterp;
+    }
+
+    AstNode* newActivityAll(AstNode* insertp) {
+        ++m_statSettersSlow;
+        if (!m_actAllFuncp) {
+            FileLine* const flp = m_topScopep->fileline();
+            AstCFunc* const funcp = new AstCFunc{flp, "__Vm_traceActivitySetAll", m_topScopep};
+            funcp->slow(true);
+            funcp->isStatic(false);
+            funcp->isLoose(true);
+            m_topScopep->addBlocksp(funcp);
+            for (uint32_t code = 0; code < m_activityNumber; ++code) {
+                AstNode* const setterp = newActivitySetter(insertp, code);
+                funcp->addStmtsp(setterp);
             }
-            funcp->addStmtsp(setterp);
-        } else {
-            insertp->v3fatalSrc("Bad trace activity vertex");
+            m_actAllFuncp = funcp;
         }
+        AstCCall* const callp = new AstCCall{insertp->fileline(), m_actAllFuncp};
+        callp->dtypeSetVoid();
+        return callp->makeStmt();
     }
 
     void createActivityFlags() {
@@ -461,17 +449,33 @@ private:
         m_activityVscp = newvscp;
 
         // Insert activity setters
-        for (const V3GraphVertex* itp = m_graph.verticesBeginp(); itp;
-             itp = itp->verticesNextp()) {
-            if (const TraceActivityVertex* const vtxp = itp->cast<const TraceActivityVertex>()) {
+        for (const V3GraphVertex& vtx : m_graph.vertices()) {
+            if (const TraceActivityVertex* const vtxp = vtx.cast<const TraceActivityVertex>()) {
+                AstNode* setterp = nullptr;
                 if (vtxp->activitySlow()) {
+                    setterp = newActivityAll(vtxp->insertp());
                     // Just set all flags in slow code as it should be rare.
                     // This will be rolled up into a loop by V3Reloop.
-                    for (uint32_t code = 0; code < m_activityNumber; ++code) {
-                        addActivitySetter(vtxp->insertp(), code);
-                    }
                 } else if (!vtxp->activityAlways()) {
-                    addActivitySetter(vtxp->insertp(), vtxp->activityCode());
+                    setterp = newActivitySetter(vtxp->insertp(), vtxp->activityCode());
+                }
+                if (setterp) {
+                    AstNode* const insertp = vtxp->insertp();
+                    if (AstStmtExpr* const stmtp = VN_CAST(insertp, StmtExpr)) {
+                        stmtp->addNextHere(setterp);
+                    } else if (AstCFunc* const funcp = VN_CAST(insertp, CFunc)) {
+                        // If there are awaits, insert the setter after each await
+                        if (funcp->isCoroutine() && funcp->stmtsp()) {
+                            funcp->stmtsp()->foreachAndNext([&](AstCAwait* awaitp) {
+                                AstNode* stmtp = awaitp->backp();
+                                while (VN_IS(stmtp, NodeExpr)) stmtp = stmtp->backp();
+                                stmtp->addNextHere(setterp->cloneTree(false));
+                            });
+                        }
+                        funcp->addStmtsp(setterp);
+                    } else {
+                        insertp->v3fatalSrc("Bad trace activity vertex");
+                    }
                 }
             }
         }
@@ -550,7 +554,7 @@ private:
                     addInitStr("const uint32_t base VL_ATTR_UNUSED = "
                                "vlSymsp->__Vm_baseCode + "
                                + cvtToStr(baseCode) + ";\n");
-                    addInitStr("if (false && bufp) {}  // Prevent unused\n");
+                    addInitStr("(void)bufp;  // Prevent unused variable warning\n");
                 } else {
                     addInitStr("uint32_t* const oldp VL_ATTR_UNUSED = "
                                "bufp->oldp(vlSymsp->__Vm_baseCode + "
@@ -595,8 +599,9 @@ private:
             UASSERT_OBJ(declp->code() == 0, declp,
                         "Canonical node should not have code assigned yet");
             declp->code(m_code);
-            m_code += declp->codeInc();
-            m_statUniqCodes += declp->codeInc();
+            const uint32_t codeInc = declp->codeInc();
+            m_code += codeInc;
+            m_statUniqCodes += codeInc;
             ++m_statUniqSigs;
 
             // If this is a const signal, add the AstTraceInc
@@ -730,8 +735,8 @@ private:
         m_regFuncp->addStmtsp(new AstText{fl, ", vlSelf);\n", true});
 
         // Clear global activity flag
-        cleanupFuncp->addStmtsp(new AstCStmt{m_topScopep->fileline(),
-                                             std::string{"vlSymsp->__Vm_activity = false;\n"}});
+        cleanupFuncp->addStmtsp(
+            new AstCStmt{m_topScopep->fileline(), "vlSymsp->__Vm_activity = false;\n"s});
 
         // Clear fine grained activity flags
         for (uint32_t i = 0; i < m_activityNumber; ++i) {
@@ -923,8 +928,10 @@ public:
         iterate(nodep);
     }
     ~TraceVisitor() override {
-        V3Stats::addStat("Tracing, Unique traced signals", m_statUniqSigs);
+        V3Stats::addStat("Tracing, Activity setters", m_statSetters);
+        V3Stats::addStat("Tracing, Activity slow blocks", m_statSettersSlow);
         V3Stats::addStat("Tracing, Unique trace codes", m_statUniqCodes);
+        V3Stats::addStat("Tracing, Unique traced signals", m_statUniqSigs);
     }
 };
 
@@ -934,5 +941,5 @@ public:
 void V3Trace::traceAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { TraceVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("trace", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("trace", 0, dumpTreeEitherLevel() >= 3);
 }

@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -108,7 +108,6 @@ static bool hasFlags(AstNode* const nodep, uint8_t flags) { return !(~nodep->use
 //  Detect nodes affected by timing and/or requiring a process
 
 class TimingSuspendableVisitor final : public VNVisitor {
-private:
     // TYPES
     // Vertex of a dependency graph of suspendable nodes, e.g. if a node (process or task) is
     // suspendable, all its dependents should also be suspendable
@@ -228,8 +227,8 @@ private:
     // Propagate flag to all nodes that depend on the given one
     void propagateFlags(DepVtx* const vxp, NodeFlag flag) {
         auto* const parentp = vxp->nodep();
-        for (V3GraphEdge* edgep = vxp->outBeginp(); edgep; edgep = edgep->outNextp()) {
-            auto* const depVxp = static_cast<DepVtx*>(edgep->top());
+        for (V3GraphEdge& edge : vxp->outEdges()) {
+            auto* const depVxp = static_cast<DepVtx*>(edge.top());
             AstNode* const depp = depVxp->nodep();
             if (passFlag(parentp, depp, flag)) propagateFlags(depVxp, flag);
         }
@@ -237,19 +236,19 @@ private:
     template <typename Predicate>
     void propagateFlagsIf(DepVtx* const vxp, NodeFlag flag, Predicate p) {
         auto* const parentp = vxp->nodep();
-        for (V3GraphEdge* edgep = vxp->outBeginp(); edgep; edgep = edgep->outNextp()) {
-            auto* const depVxp = static_cast<DepVtx*>(edgep->top());
+        for (V3GraphEdge& edge : vxp->outEdges()) {
+            auto* const depVxp = static_cast<DepVtx*>(edge.top());
             AstNode* const depp = depVxp->nodep();
-            if (p(edgep) && passFlag(parentp, depp, flag)) propagateFlagsIf(depVxp, flag, p);
+            if (p(&edge) && passFlag(parentp, depp, flag)) propagateFlagsIf(depVxp, flag, p);
         }
     }
     template <typename Predicate>
     void propagateFlagsReversedIf(DepVtx* const vxp, NodeFlag flag, Predicate p) {
         auto* const parentp = vxp->nodep();
-        for (V3GraphEdge* edgep = vxp->inBeginp(); edgep; edgep = edgep->inNextp()) {
-            auto* const depVxp = static_cast<DepVtx*>(edgep->fromp());
+        for (V3GraphEdge& edge : vxp->inEdges()) {
+            auto* const depVxp = static_cast<DepVtx*>(edge.fromp());
             AstNode* const depp = depVxp->nodep();
-            if (p(edgep) && passFlag(parentp, depp, flag))
+            if (p(&edge) && passFlag(parentp, depp, flag))
                 propagateFlagsReversedIf(depVxp, flag, p);
         }
     }
@@ -278,6 +277,28 @@ private:
     void visit(AstWaitFork* nodep) override {
         visit(static_cast<AstNode*>(nodep));
         addFlags(m_procp, T_FORCES_PROC | T_NEEDS_PROC);
+    }
+    void visit(AstWait* nodep) override {
+        AstNodeExpr* const condp = V3Const::constifyEdit(nodep->condp());
+        if (AstConst* const constp = VN_CAST(condp, Const)) {
+            if (!nodep->fileline()->warnIsOff(V3ErrorCode::WAITCONST)) {
+                condp->v3warn(WAITCONST, "Wait statement condition is constant");
+            }
+            if (!constp->isZero()) {
+                // Remove AstWait before we track process as T_SUSPENDER
+                if (AstNode* const stmtsp = nodep->stmtsp()) {
+                    stmtsp->unlinkFrBackWithNext();
+                    nodep->replaceWith(stmtsp);
+                } else {
+                    nodep->unlinkFrBack();
+                }
+                VL_DO_DANGLING(pushDeletep(nodep), nodep);
+                return;
+            }
+        }
+        v3Global.setUsesTiming();
+        if (m_procp) addFlags(m_procp, T_SUSPENDEE | T_SUSPENDER | T_NEEDS_PROC);
+        iterateChildren(nodep);
     }
     void visit(AstCFunc* nodep) override {
         VL_RESTORER(m_procp);
@@ -320,16 +341,11 @@ private:
         }
     }
     void visit(AstNodeCCall* nodep) override {
-        if (!m_underFork || (m_underFork & F_MIGHT_SUSPEND))
-            new V3GraphEdge{&m_suspGraph, getSuspendDepVtx(nodep->funcp()),
-                            getSuspendDepVtx(m_procp), m_underFork ? P_FORK : P_CALL};
+        new V3GraphEdge{&m_suspGraph, getSuspendDepVtx(nodep->funcp()), getSuspendDepVtx(m_procp),
+                        P_CALL};
 
         new V3GraphEdge{&m_procGraph, getNeedsProcDepVtx(nodep->funcp()),
                         getNeedsProcDepVtx(m_procp), P_CALL};
-
-        if (m_underFork && !(m_underFork & F_MIGHT_SUSPEND)) {
-            addFlags(nodep, T_NEEDS_PROC | T_ALLOCS_PROC);
-        }
 
         iterateChildren(nodep);
     }
@@ -344,9 +360,7 @@ private:
         new V3GraphEdge{&m_procGraph, getNeedsProcDepVtx(nodep), getNeedsProcDepVtx(m_procp),
                         P_CALL};
 
-        if (m_underFork && !(m_underFork & F_MIGHT_SUSPEND)) {
-            addFlags(nodep, T_NEEDS_PROC | T_ALLOCS_PROC);
-        }
+        if (m_underFork) addFlags(nodep, T_NEEDS_PROC | T_ALLOCS_PROC);
 
         m_procp = nodep;
         m_underFork = 0;
@@ -387,34 +401,34 @@ public:
         m_suspGraph.removeTransitiveEdges();
         m_procGraph.removeTransitiveEdges();
         // Propagate suspendability
-        for (V3GraphVertex* vxp = m_suspGraph.verticesBeginp(); vxp; vxp = vxp->verticesNextp()) {
-            DepVtx* const depVxp = static_cast<DepVtx*>(vxp);
-            if (hasFlags(depVxp->nodep(), T_SUSPENDEE)) propagateFlags(depVxp, T_SUSPENDEE);
+        for (V3GraphVertex& vtx : m_suspGraph.vertices()) {
+            DepVtx& depVtx = static_cast<DepVtx&>(vtx);
+            if (hasFlags(depVtx.nodep(), T_SUSPENDEE)) propagateFlags(&depVtx, T_SUSPENDEE);
         }
         if (dumpGraphLevel() >= 6) m_suspGraph.dumpDotFilePrefixed("timing_deps");
 
         // Propagate T_HAS_PROCESS
-        for (V3GraphVertex* vxp = m_procGraph.verticesBeginp(); vxp; vxp = vxp->verticesNextp()) {
-            DepVtx* const depVxp = static_cast<DepVtx*>(vxp);
+        for (V3GraphVertex& vtx : m_procGraph.vertices()) {
+            DepVtx& depVtx = static_cast<DepVtx&>(vtx);
             // Find processes that'll allocate VlProcess
-            if (hasFlags(depVxp->nodep(), T_FORCES_PROC)) {
-                propagateFlagsIf(depVxp, T_FORCES_PROC, [&](const V3GraphEdge* e) -> bool {
+            if (hasFlags(depVtx.nodep(), T_FORCES_PROC)) {
+                propagateFlagsIf(&depVtx, T_FORCES_PROC, [&](const V3GraphEdge* e) -> bool {
                     return !hasFlags(static_cast<DepVtx*>(e->fromp())->nodep(), T_ALLOCS_PROC);
                 });
             }
             // Mark nodes on paths between processes and statements that use VlProcess
-            if (hasFlags(depVxp->nodep(), T_NEEDS_PROC)) {
-                propagateFlagsIf(depVxp, T_NEEDS_PROC, [&](const V3GraphEdge* e) -> bool {
+            if (hasFlags(depVtx.nodep(), T_NEEDS_PROC)) {
+                propagateFlagsIf(&depVtx, T_NEEDS_PROC, [&](const V3GraphEdge* e) -> bool {
                     return !hasFlags(static_cast<DepVtx*>(e->top())->nodep(), T_ALLOCS_PROC);
                 });
             }
         }
-        for (V3GraphVertex* vxp = m_procGraph.verticesBeginp(); vxp; vxp = vxp->verticesNextp()) {
-            DepVtx* const depVxp = static_cast<DepVtx*>(vxp);
+        for (V3GraphVertex& vtx : m_procGraph.vertices()) {
+            DepVtx& depVtx = static_cast<DepVtx&>(vtx);
             // Mark nodes that will be emitted with a VlProcess argument
-            if (hasFlags(depVxp->nodep(), T_ALLOCS_PROC | T_FORCES_PROC)) {
-                addFlags(depVxp->nodep(), T_HAS_PROC);
-                propagateFlagsReversedIf(depVxp, T_HAS_PROC, [&](const V3GraphEdge* e) -> bool {
+            if (hasFlags(depVtx.nodep(), T_ALLOCS_PROC | T_FORCES_PROC)) {
+                addFlags(depVtx.nodep(), T_HAS_PROC);
+                propagateFlagsReversedIf(&depVtx, T_HAS_PROC, [&](const V3GraphEdge* e) -> bool {
                     return hasFlags(static_cast<DepVtx*>(e->fromp())->nodep(), T_NEEDS_PROC);
                 });
             }
@@ -428,10 +442,11 @@ public:
 //  Transform nodes affected by timing
 
 class TimingControlVisitor final : public VNVisitor {
-private:
     // NODE STATE
     //  Ast{Always,NodeCCall,Fork,NodeAssign}::user1()  -> bool.         Set true if the node has
     //                                                                   been processed.
+    //  AstAssignW::user1()                             -> bool.         Set true if the assignment
+    //                                                                   represents the net delay
     //  AstSenTree::user1()                             -> AstVarScope*. Trigger scheduler assigned
     //                                                                   to this sentree
     //  Ast{NodeProcedure,CFunc,Begin}::user2()         -> bool.         Set true if process/task
@@ -452,14 +467,15 @@ private:
     AstScope* m_scopep = nullptr;  // Current scope
     AstActive* m_activep = nullptr;  // Current active
     AstNode* m_procp = nullptr;  // NodeProcedure/CFunc/Begin we're under
-    double m_timescaleFactor = 1.0;  // Factor to scale delays by
     int m_forkCnt = 0;  // Number of forks inside a module
     bool m_underJumpBlock = false;  // True if we are inside of a jump-block
     bool m_underProcedure = false;  // True if we are under an always or initial
 
     // Unique names
     V3UniqueNames m_dlyforkNames{"__Vdlyfork"};  // Names for temp AssignW vars
-    V3UniqueNames m_contAssignVarNames{"__VassignWtmp"};  // Names for temp AssignW vars
+    V3UniqueNames m_contAsgnTmpNames{"__VassignWtmp"};  // Names for temp AssignW vars
+    V3UniqueNames m_contAsgnGenNames{"__VassignWgen"};  // Continuous assign generation name
+                                                        // generator
     V3UniqueNames m_intraValueNames{"__Vintraval"};  // Intra assign delay value var names
     V3UniqueNames m_intraIndexNames{"__Vintraidx"};  // Intra assign delay index var names
     V3UniqueNames m_intraLsbNames{"__Vintralsb"};  // Intra assign delay LSB var names
@@ -481,55 +497,34 @@ private:
     SenExprBuilder* m_senExprBuilderp = nullptr;  // Sens expression builder for current m_scope
 
     // METHODS
-    // Find net delay on the LHS of an assignment
-    AstDelay* getLhsNetDelayRecurse(const AstNodeExpr* const nodep) const {
-        if (const AstNodeVarRef* const refp = VN_CAST(nodep, NodeVarRef)) {
-            if (refp->varp()->delayp()) return refp->varp()->delayp()->unlinkFrBack();
-        } else if (const AstSel* const selp = VN_CAST(nodep, Sel)) {
-            return getLhsNetDelayRecurse(selp->fromp());
-        }
-        return nullptr;
-    }
     // Transform an assignment with an intra timing control into a timing control with the
     // assignment under it
     AstNode* factorOutTimingControl(AstNodeAssign* nodep) const {
         AstNode* stmtp = nodep;
-        AstDelay* delayp = getLhsNetDelayRecurse(nodep->lhsp());
-        FileLine* const flp = nodep->fileline();
         AstNode* const controlp = nodep->timingControlp();
-        if (controlp) {
-            controlp->unlinkFrBack();
-            if (auto* const assignDelayp = VN_CAST(controlp, Delay)) {
-                if (delayp) {
-                    delayp->lhsp(new AstAdd{flp, delayp->lhsp()->unlinkFrBack(),
-                                            assignDelayp->lhsp()->unlinkFrBack()});
-                    VL_DO_DANGLING(assignDelayp->deleteTree(), nodep);
-                } else {
-                    delayp = assignDelayp;
-                }
-            }
-        }
-        if (delayp) {
-            stmtp->replaceWith(delayp);
+        if (AstDelay* const delayp = VN_CAST(controlp, Delay)) {
+            stmtp->replaceWith(delayp->unlinkFrBack());
             delayp->addStmtsp(stmtp);
             stmtp = delayp;
-        }
-        if (auto* const sensesp = VN_CAST(controlp, SenTree)) {
-            auto* const eventControlp = new AstEventControl{flp, sensesp, nullptr};
+        } else if (AstSenTree* const sensesp = VN_CAST(controlp, SenTree)) {
+            AstEventControl* const eventControlp
+                = new AstEventControl{sensesp->fileline(), sensesp->unlinkFrBack(), nullptr};
             stmtp->replaceWith(eventControlp);
             eventControlp->addStmtsp(stmtp);
             stmtp = eventControlp;
-        } else if (auto* const beginp = VN_CAST(controlp, Begin)) {
+        } else if (AstBegin* const beginp = VN_CAST(controlp, Begin)) {
             // Begin from V3AssertPre
-            stmtp->replaceWith(beginp);
+            stmtp->replaceWith(beginp->unlinkFrBack());
             beginp->addStmtsp(stmtp);
             stmtp = beginp;
         }
         return stmtp == nodep ? nullptr : stmtp;
     }
     // Calculate the factor to scale delays by
-    double calculateTimescaleFactor(VTimescale timeunit) const {
-        int scalePowerOfTen = timeunit.powerOfTen() - m_netlistp->timeprecision().powerOfTen();
+    double calculateTimescaleFactor(AstNode* nodep, VTimescale timeunit) const {
+        UASSERT_OBJ(!timeunit.isNone(), nodep, "timenunit must be set");
+        const int scalePowerOfTen
+            = timeunit.powerOfTen() - m_netlistp->timeprecision().powerOfTen();
         return std::pow(10.0, scalePowerOfTen);
     }
     // Creates the global delay scheduler variable
@@ -762,8 +757,6 @@ private:
         UASSERT(!m_classp, "Module or class under class");
         VL_RESTORER(m_classp);
         m_classp = VN_CAST(nodep, Class);
-        VL_RESTORER(m_timescaleFactor);
-        m_timescaleFactor = calculateTimescaleFactor(nodep->timeunit());
         VL_RESTORER(m_forkCnt);
         m_forkCnt = 0;
         iterateChildren(nodep);
@@ -875,27 +868,24 @@ private:
                     "Cycle delays should have been handled in V3AssertPre");
         FileLine* const flp = nodep->fileline();
         AstNodeExpr* valuep = V3Const::constifyEdit(nodep->lhsp()->unlinkFrBack());
-        auto* const constp = VN_CAST(valuep, Const);
-        if (constp && constp->isZero()) {
-            nodep->v3warn(ZERODLY, "Unsupported: #0 delays do not schedule process resumption in "
-                                   "the Inactive region");
-        } else {
+        AstConst* const constp = VN_CAST(valuep, Const);
+        if (!constp || !constp->isZero()) {
             // Scale the delay
-            if (valuep->dtypep()->isDouble()) {
+            const double timescaleFactor = calculateTimescaleFactor(nodep, nodep->timeunit());
+            if (valuep->dtypep()->skipRefp()->isDouble()) {
                 valuep = new AstRToIRoundS{
-                    flp,
-                    new AstMulD{flp, valuep,
-                                new AstConst{flp, AstConst::RealDouble{}, m_timescaleFactor}}};
+                    flp, new AstMulD{flp, valuep,
+                                     new AstConst{flp, AstConst::RealDouble{}, timescaleFactor}}};
                 valuep->dtypeSetBitSized(64, VSigning::UNSIGNED);
             } else {
                 valuep->dtypeSetBitSized(64, VSigning::UNSIGNED);
                 valuep = new AstMul{flp, valuep,
                                     new AstConst{flp, AstConst::Unsized64{},
-                                                 static_cast<uint64_t>(m_timescaleFactor)}};
+                                                 static_cast<uint64_t>(timescaleFactor)}};
             }
         }
         // Replace self with a 'co_await dlySched.delay(<valuep>)'
-        auto* const delayMethodp = new AstCMethodHard{
+        AstCMethodHard* const delayMethodp = new AstCMethodHard{
             flp, new AstVarRef{flp, getCreateDelayScheduler(), VAccess::WRITE}, "delay", valuep};
         delayMethodp->dtypeSetVoid();
         addProcessInfo(delayMethodp);
@@ -916,12 +906,6 @@ private:
         // Do not allow waiting on local named events, as they get enqueued for clearing, but can
         // go out of scope before that happens
         if (!nodep->sensesp()) nodep->v3warn(E_UNSUPPORTED, "Unsupported: no sense equation (@*)");
-        if (nodep->sensesp()->exists([](const AstNodeVarRef* refp) {
-                AstBasicDType* const dtypep = refp->dtypep()->skipRefp()->basicp();
-                return dtypep && dtypep->isEvent() && refp->varp()->isFuncLocal();
-            })) {
-            nodep->v3warn(E_UNSUPPORTED, "Unsupported: waiting on local event variables");
-        }
         FileLine* const flp = nodep->fileline();
         // Relink child statements after the event control
         if (nodep->stmtsp()) nodep->addNextHere(nodep->stmtsp()->unlinkFrBackWithNext());
@@ -1029,8 +1013,12 @@ private:
         // Special case for NBA
         if (inAssignDly) {
             // Put it in a fork so it doesn't block
-            auto* const forkp = new AstFork{flp, "", nullptr};
-            forkp->joinType(VJoinType::JOIN_NONE);
+            // Could already be the only thing directly under a fork, reuse that if possible
+            AstFork* forkp = !nodep->nextp() ? VN_CAST(nodep->firstAbovep(), Fork) : nullptr;
+            if (!forkp) {
+                forkp = new AstFork{flp, "", nullptr};
+                forkp->joinType(VJoinType::JOIN_NONE);
+            }
             if (!m_underProcedure) {
                 // If it's in a function, it won't be handled by V3Delayed
                 // Put it behind an additional named event that gets triggered in the NBA region
@@ -1055,64 +1043,123 @@ private:
             controlp->addHereThisAsNext(
                 new AstAssign{flp, new AstVarRef{flp, newvscp, VAccess::WRITE}, valuep});
         };
-        // Create the intermediate select vars. Note: because 'foreach' proceeds in
-        // pre-order, and we replace indices in selects with variables, we cannot
-        // reach another select under the index position. This is exactly what
-        // we want as only the top level selects are LValues. As an example,
-        // this transforms 'x[a[i]][b[j]] = y'
-        // into 't1 = a[i]; t0 = b[j]; x[t1][t0] = y'.
-        nodep->lhsp()->foreach([&](AstSel* selp) {
-            if (VN_IS(selp->lsbp(), Const)) return;
-            replaceWithIntermediate(selp->lsbp(), m_intraLsbNames.get(nodep));
-            // widthp should be const
-        });
-        nodep->lhsp()->foreach([&](AstNodeSel* selp) {
-            if (VN_IS(selp->bitp(), Const)) return;
-            replaceWithIntermediate(selp->bitp(), m_intraIndexNames.get(nodep));
-        });
+        // NBAs with delays evaluate LHS indices immediately
+        if (inAssignDly) {
+            // Create the intermediate select vars. Note: because 'foreach' proceeds in pre-order,
+            // and we replace indices in selects with variables, we cannot reach another select
+            // under the index position. This is exactly what we want as only the top level selects
+            // are LValues. As an example, this transforms 'x[a[i]][b[j]] = y' into 't1 = a[i]; t0
+            // = b[j]; x[t1][t0] = y'.
+            nodep->lhsp()->foreach([&](AstSel* selp) {
+                if (VN_IS(selp->lsbp(), Const)) return;
+                replaceWithIntermediate(selp->lsbp(), m_intraLsbNames.get(nodep));
+                // widthp should be const
+            });
+            nodep->lhsp()->foreach([&](AstNodeSel* selp) {
+                if (VN_IS(selp->bitp(), Const)) return;
+                replaceWithIntermediate(selp->bitp(), m_intraIndexNames.get(nodep));
+            });
+        }
         // Replace the RHS with an intermediate value var
         replaceWithIntermediate(nodep->rhsp(), m_intraValueNames.get(nodep));
     }
     void visit(AstAssignW* nodep) override {
-        AstDelay* const netDelayp = getLhsNetDelayRecurse(nodep->lhsp());
-        if (!netDelayp && !nodep->timingControlp()) return;
-        // This assignment will be converted to an always. In some cases this may generate an
-        // UNOPTFLAT, e.g.: assign #1 clk = ~clk. We create a temp var for the LHS of this
-        // assign, to disable the UNOPTFLAT warning for it.
-        // TODO: Find a way to do this without introducing this var. Perhaps make
-        // V3SchedAcyclic recognize awaits and prevent it from treating this kind of logic as
-        // cyclic
-        AstNodeExpr* const lhsp = nodep->lhsp()->unlinkFrBack();
-        std::string varname;
-        if (auto* const refp = VN_CAST(lhsp, VarRef)) {
-            varname = m_contAssignVarNames.get(refp->name());
-        } else {
-            varname = m_contAssignVarNames.get(lhsp);
-        }
-        auto* const tempvscp = m_scopep->createTemp(varname, lhsp->dtypep());
-        tempvscp->varp()->delayp(netDelayp);
         FileLine* const flp = nodep->fileline();
+        // Get the net delay unless this assignment was created for handling the net delay (user1)
+        AstDelay* const netDelayp = nodep->user1() ? nullptr : nodep->getLhsNetDelay();
+        if (netDelayp) {
+            if (nodep->timingControlp()) {
+                // If this assignment has a delay, create another one to handle the net delay
+                AstVarScope* const newvscp
+                    = createTemp(flp, m_contAsgnTmpNames.get(nodep), nodep->dtypep());
+                AstAssignW* assignp = new AstAssignW{
+                    nodep->fileline(), nodep->lhsp()->unlinkFrBack(),
+                    new AstVarRef{flp, newvscp, VAccess::READ}, netDelayp->cloneTree(false)};
+                assignp->user1(true);
+                nodep->addNextHere(assignp);
+                nodep->lhsp(new AstVarRef{flp, newvscp, VAccess::WRITE});
+            } else {
+                // Else just use this one with the net delay
+                nodep->timingControlp(netDelayp->cloneTree(false));
+            }
+        }
+        if (!nodep->timingControlp()) return;
+        // There will be some circular logic here, suppress the warning for newly created vars
         flp->modifyWarnOff(V3ErrorCode::UNOPTFLAT, true);
-        tempvscp->fileline(flp);
-        tempvscp->varp()->fileline(flp);
-        // Remap the LHS to the new temp var
-        nodep->lhsp(new AstVarRef{flp, tempvscp, VAccess::WRITE});
+        // Also suppress the warning for the LHS var, for cases like `assign #1 clk = ~clk;`
+        // TODO: Restore the warning for other, non-delayed drivers
+        nodep->lhsp()->foreach([](AstVarRef* refp) {
+            if (refp->access().isWriteOrRW()) {
+                refp->varp()->fileline()->modifyWarnOff(V3ErrorCode::UNOPTFLAT, true);
+            }
+        });
         // Convert it to an always; the new assign with intra delay will be handled by
         // visit(AstNodeAssign*)
         AstAlways* const alwaysp = nodep->convertToAlways();
-        visit(alwaysp);
-        // Put the LHS back in the AssignW; put the temp var on the RHS
-        nodep->lhsp(lhsp);
-        nodep->rhsp(new AstVarRef{flp, tempvscp, VAccess::READ});
-        // Put the AssignW right after the always. Different order can produce UNOPTFLAT on the LHS
-        // var
-        alwaysp->addNextHere(nodep);
+        visit(alwaysp);  // Visit now as we need to do some post-processing
+        VL_DO_DANGLING(nodep->deleteTree(), nodep);
+        // IEEE 1800-2023 10.3.3 - if the RHS value differs from the currently scheduled value to
+        // be assigned, the currently scheduled assignment is descheduled. To keep track if an
+        // assignment should be descheduled, each scheduled assignment event has a 'generation',
+        // and if at assignment time its generation differs from the current generation, it won't
+        // be performed
+        AstFork* const forkp = VN_AS(alwaysp->stmtsp(), Fork);
+        UASSERT_OBJ(forkp, alwaysp, "Fork should be there from convertToAlways()");
+        AstBegin* const beginp = VN_AS(forkp->stmtsp(), Begin);
+        UASSERT_OBJ(beginp, alwaysp, "Begin should be there from convertToAlways()");
+        AstAssign* const preAssignp = VN_AS(beginp->stmtsp(), Assign);
+        UASSERT_OBJ(preAssignp, alwaysp, "Pre-assign should be there from convertToAlways()");
+        AstAssign* const postAssignp = VN_AS(preAssignp->nextp()->nextp(), Assign);
+        UASSERT_OBJ(postAssignp, alwaysp, "Post-assign should be there from convertToAlways()");
+        // Increment generation and copy it to a local
+        AstVarScope* const generationVarp
+            = createTemp(flp, m_contAsgnGenNames.get(alwaysp), alwaysp->findUInt64DType());
+        AstVarScope* const genLocalVarp
+            = createTemp(flp, generationVarp->varp()->name() + "__local",
+                         alwaysp->findUInt64DType(), preAssignp);
+        preAssignp->addHereThisAsNext(
+            new AstAssign{flp, new AstVarRef{flp, generationVarp, VAccess::WRITE},
+                          new AstAdd{flp, new AstVarRef{flp, generationVarp, VAccess::READ},
+                                     new AstConst{flp, 1}}});
+        preAssignp->addHereThisAsNext(
+            new AstAssign{flp, new AstVarRef{flp, genLocalVarp, VAccess::WRITE},
+                          new AstVarRef{flp, generationVarp, VAccess::READ}});
+        // If the current generation is same as the one saved in the local var, assign
+        beginp->addStmtsp(
+            new AstIf{flp,
+                      new AstEq{flp, new AstVarRef{flp, generationVarp, VAccess::READ},
+                                new AstVarRef{flp, genLocalVarp, VAccess::READ}},
+                      postAssignp->unlinkFrBack()});
+        // Save scheduled RHS value before delay
+        AstVarScope* const tmpVarp
+            = createTemp(flp, m_contAsgnTmpNames.get(alwaysp), preAssignp->rhsp()->dtypep());
+        AstVarRef* const tmpAssignRhsp = VN_AS(preAssignp->lhsp(), VarRef)->cloneTree(false);
+        tmpAssignRhsp->access(VAccess::WRITE);
+        preAssignp->addNextHere(
+            new AstAssign{flp, new AstVarRef{flp, tmpVarp, VAccess::WRITE}, tmpAssignRhsp});
+        // If the RHS is different from the currently scheduled value, schedule the new assignment
+        // The generation will increase, effectively 'descheduling' the previous assignment.
+        alwaysp->addStmtsp(new AstIf{flp,
+                                     new AstNeq{flp, preAssignp->rhsp()->cloneTree(false),
+                                                new AstVarRef{flp, tmpVarp, VAccess::READ}},
+                                     forkp->unlinkFrBack()});
+    }
+    void visit(AstDisableFork* nodep) override {
+        if (hasFlags(m_procp, T_HAS_PROC)) return;
+        // never reached by any process; remove to avoid compilation error
+        VL_DO_DANGLING(nodep->unlinkFrBack()->deleteTree(), nodep);
     }
     void visit(AstWaitFork* nodep) override {
-        AstCExpr* const exprp = new AstCExpr{nodep->fileline(), "vlProcess->completedFork()", 1};
-        exprp->pure(false);
-        AstWait* const waitp = new AstWait{nodep->fileline(), exprp, nullptr};
-        nodep->replaceWith(waitp);
+        if (hasFlags(m_procp, T_HAS_PROC)) {
+            AstCExpr* const exprp
+                = new AstCExpr{nodep->fileline(), "vlProcess->completedFork()", 1};
+            exprp->pure(false);
+            AstWait* const waitp = new AstWait{nodep->fileline(), exprp, nullptr};
+            nodep->replaceWith(waitp);
+        } else {
+            // never reached by any process; remove to avoid compilation error
+            nodep->unlinkFrBack();
+        }
         VL_DO_DANGLING(nodep->deleteTree(), nodep);
     }
     void visit(AstWait* nodep) override {
@@ -1123,9 +1170,6 @@ private:
         AstNodeExpr* const condp = V3Const::constifyEdit(nodep->condp()->unlinkFrBack());
         auto* const constp = VN_CAST(condp, Const);
         if (constp) {
-            if (!nodep->fileline()->warnIsOff(V3ErrorCode::WAITCONST)) {
-                condp->v3warn(WAITCONST, "Wait statement condition is constant");
-            }
             if (constp->isZero()) {
                 // We have to await forever instead of simply returning in case we're deep in a
                 // callstack
@@ -1136,11 +1180,9 @@ private:
                 nodep->replaceWith(awaitp->makeStmt());
                 if (stmtsp) VL_DO_DANGLING(stmtsp->deleteTree(), stmtsp);
                 VL_DO_DANGLING(condp->deleteTree(), condp);
-            } else if (stmtsp) {
-                // Just put the statements there
-                nodep->replaceWith(stmtsp);
             } else {
-                nodep->unlinkFrBack();
+                nodep->v3fatalSrc("constant wait should have been removed in "
+                                  "TimingSuspendableVisitor::visit(AstWait)");
             }
         } else if (needDynamicTrigger(condp)) {
             // No point in making a sentree, just use the expression as sensitivity
@@ -1222,5 +1264,5 @@ void V3Timing::timingAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     TimingSuspendableVisitor susVisitor{nodep};
     if (v3Global.usesTiming()) TimingControlVisitor{nodep};
-    V3Global::dumpCheckGlobalTree("timing", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("timing", 0, dumpTreeEitherLevel() >= 3);
 }

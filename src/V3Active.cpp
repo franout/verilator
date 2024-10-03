@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -97,8 +97,8 @@ protected:
             result = vertexp->user();
             break;
         case LatchDetectGraphVertex::VT_BLOCK:  // (OR of potentially many siblings)
-            for (V3GraphEdge* edgep = vertexp->outBeginp(); edgep; edgep = edgep->outNextp()) {
-                if (latchCheckInternal(castVertexp(edgep->top()))) {
+            for (V3GraphEdge& edge : vertexp->outEdges()) {
+                if (latchCheckInternal(castVertexp(edge.top()))) {
                     result = true;
                     break;
                 }
@@ -106,9 +106,8 @@ protected:
             break;
         case LatchDetectGraphVertex::VT_BRANCH:  // (AND of both sibling)
                                                  // A BRANCH vertex always has exactly 2 siblings
-            LatchDetectGraphVertex* const ifp = castVertexp(vertexp->outBeginp()->top());
-            LatchDetectGraphVertex* const elsp
-                = castVertexp(vertexp->outBeginp()->outNextp()->top());
+            LatchDetectGraphVertex* const ifp = castVertexp(vertexp->outEdges().frontp()->top());
+            LatchDetectGraphVertex* const elsp = castVertexp(vertexp->outEdges().backp()->top());
             result = latchCheckInternal(ifp) && latchCheckInternal(elsp);
             break;
         }
@@ -125,8 +124,6 @@ public:
     // METHODS
     void begin() {
         // Start a new if/else tracking graph
-        // See NODE STATE comment in ActiveLatchCheckVisitor
-        AstNode::user1ClearTree();
         m_curVertexp = new LatchDetectGraphVertex{this, "ROOT"};
     }
     // Clear out userp field of referenced outputs on destruction
@@ -172,7 +169,7 @@ public:
         for (const auto& vrp : m_outputs) {
             LatchDetectGraphVertex* const vertp = castVertexp(vrp->varp()->user1p());
             vertp->user(true);  // Identify the output vertex we are checking paths _to_
-            if (!latchCheckInternal(castVertexp(verticesBeginp()))) latch_detected = true;
+            if (!latchCheckInternal(castVertexp(vertices().frontp()))) latch_detected = true;
             if (latch_detected && !latch_expected) {
                 nodep->v3warn(
                     LATCH,
@@ -197,7 +194,6 @@ public:
 // Collect existing active names
 
 class ActiveNamer final : public VNVisitor {
-private:
     // STATE
     AstScope* m_scopep = nullptr;  // Current scope to add statement to
     AstActive* m_sActivep = nullptr;  // For current scope, the Static active we're building
@@ -308,7 +304,6 @@ AstActive*& ActiveNamer::getSpecialActive<AstSenItem::Combo>() {
 // Latch checking visitor
 
 class ActiveLatchCheckVisitor final : public VNVisitorConst {
-private:
     // NODE STATE
     // Input:
     //  AstVar::user1p // V2LatchGraphVertex* The vertex handling this node
@@ -425,7 +420,6 @@ public:
 // Active class functions
 
 class ActiveVisitor final : public VNVisitor {
-private:
     // NODE STATE
     //  Each call to V3Const::constify
     //   AstVarScope::user1()           bool: This VarScope is referenced in the sensitivity list
@@ -653,5 +647,5 @@ public:
 void V3Active::activeAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { ActiveVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("active", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("active", 0, dumpTreeEitherLevel() >= 3);
 }

@@ -1,4 +1,4 @@
-.. Copyright 2003-2023 by Wilson Snyder.
+.. Copyright 2003-2024 by Wilson Snyder.
 .. SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 .. _Simulation Runtime Arguments:
@@ -19,10 +19,19 @@ Summary:
    .. include:: ../_build/gen/args_verilated.rst
 
 
+.. option:: +verilator+coverage+file+<filename>
+
+   When a model was Verilated using :vlopt:`--coverage`, sets the filename
+   to write coverage data into.  Defaults to :file:`coverage.dat`.
+
 .. option:: +verilator+debug
 
    Enable simulation runtime debugging.  Equivalent to
    :vlopt:`+verilator+debugi+4 <+verilator+debugi+\<value\>>`.
+
+   To be useful, the model typically must first be compiled with debug
+   capabilities by Verilating with :vlopt:`--runtime-debug` or `-CFLAGS
+   -DVL_DEBUG=1`.
 
 .. option:: +verilator+debugi+<value>
 
@@ -31,8 +40,8 @@ Summary:
 .. option:: +verilator+error+limit+<value>
 
    Set number of non-fatal errors (e.g. assertion failures) before exiting
-   simulation runtime. Also affects number of $stop calls needed before
-   exit. Defaults to 1.
+   simulation runtime. Also affects number of `$stop` calls needed before
+   exit. Does not affect `$fatal`. Defaults to 1.
 
 .. option:: +verilator+help
 
@@ -64,21 +73,29 @@ Summary:
 
 .. option:: +verilator+prof+threads+file+<filename>
 
-   Deprecated. Alias for :vlopt:`+verilator+prof+exec+file+\<filename\>`
+   Removed in 5.020. Was an alias for
+   :vlopt:`+verilator+prof+exec+file+\<filename\>`
 
 .. option:: +verilator+prof+threads+start+<value>
 
-   Deprecated. Alias for :vlopt:`+verilator+prof+exec+start+\<value\>`
+   Removed in 5.020. Was an alias for
+   :vlopt:`+verilator+prof+exec+start+\<value\>`
 
 .. option:: +verilator+prof+threads+window+<value>
 
-   Deprecated. Alias for :vlopt:`+verilator+prof+exec+window+\<value\>`
+   Removed in 5.020. Was an alias for
+   :vlopt:`+verilator+prof+exec+window+\<value\>`
 
 .. option:: +verilator+prof+vlt+file+<filename>
 
    When a model was Verilated using :vlopt:`--prof-pgo`, sets the
    profile-guided optimization data runtime filename to dump to.  Defaults
    to :file:`profile.vlt`.
+
+.. option:: +verilator+quiet
+
+   Disable printing the simulation summary report, see :ref:`Simulation
+   Summary Report`.
 
 .. option:: +verilator+rand+reset+<value>
 

@@ -8,6 +8,16 @@
 
 FROM ubuntu:22.04
 
+# Create the user
+RUN groupadd verilator \
+    && useradd -g verilator -m verilator -s /bin/bash \
+    && apt-get update \
+    && apt-get install --no-install-recommends -y sudo \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo verilator ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/verilator \
+    && chmod 0440 /etc/sudoers.d/verilator
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive \
        apt-get install --no-install-recommends -y \
@@ -33,15 +43,13 @@ RUN apt-get update \
                         perl \
                         python3 \
                         wget \
-                        zlibc \
+                        z3 \
                         zlib1g \
                         zlib1g-dev \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp
-
-RUN cpan install -fi Parallel::Forker
 
 RUN git clone https://github.com/veripool/vcddiff.git && \
     make -C vcddiff && \
@@ -51,6 +59,8 @@ RUN git clone https://github.com/veripool/vcddiff.git && \
 COPY build.sh /tmp/build.sh
 
 ENV VERILATOR_AUTHOR_SITE=1
+
+USER verilator
 
 WORKDIR /work
 

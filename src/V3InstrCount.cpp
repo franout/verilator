@@ -7,7 +7,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -30,7 +30,6 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 /// whichever is larger. We know we won't run both.
 
 class InstrCountVisitor final : public VNVisitorConst {
-private:
     // NODE STATE
     //  AstNode::user1()        -> bool. Processed if assertNoDups
     //  AstNode::user2()        -> int.  Path cost + 1, 0 means don't dump
@@ -48,7 +47,6 @@ private:
     // TYPES
     // Little class to cleanly call startVisitBase/endVisitBase
     class VisitBase final {
-    private:
         // MEMBERS
         uint32_t m_savedCount;
         AstNode* const m_nodep;
@@ -73,7 +71,7 @@ public:
         : m_startNodep{nodep}
         , m_assertNoDups{assertNoDups}
         , m_osp{osp} {
-        if (nodep) iterateConst(nodep);
+        iterateConstNull(nodep);
     }
     ~InstrCountVisitor() override = default;
 
@@ -210,12 +208,12 @@ private:
         const uint32_t elseCount = m_instrCount;
 
         reset();
-        if (ifCount < elseCount) {
-            m_instrCount = savedCount + elseCount;
-            if (nodep->thenp()) nodep->thenp()->user2(0);  // Don't dump it
-        } else {
+        if (ifCount >= elseCount) {
             m_instrCount = savedCount + ifCount;
             if (nodep->elsep()) nodep->elsep()->user2(0);  // Don't dump it
+        } else {
+            m_instrCount = savedCount + elseCount;
+            if (nodep->thenp()) nodep->thenp()->user2(0);  // Don't dump it
         }
     }
     void visit(AstCAwait* nodep) override {
@@ -287,7 +285,6 @@ private:
 
 // Iterate the graph printing the critical path marked by previous visitation
 class InstrCountDumpVisitor final : public VNVisitorConst {
-private:
     // NODE STATE
     //  AstNode::user2()        -> int.  Path cost, 0 means don't dump
 

@@ -53,36 +53,44 @@ void VlCoroutineHandle::dump() const {
 //======================================================================
 // VlDelayScheduler:: Methods
 
-#ifdef VL_DEBUG
-void VlDelayScheduler::VlDelayedCoroutine::dump() const {
-    VL_DBG_MSGF("             Awaiting time %" PRIu64 ": ", m_timestep);
-    m_handle.dump();
-}
-#endif
-
 void VlDelayScheduler::resume() {
 #ifdef VL_DEBUG
     VL_DEBUG_IF(dump(); VL_DBG_MSGF("         Resuming delayed processes\n"););
 #endif
-    while (awaitingCurrentTime()) {
-        if (m_queue.front().m_timestep != m_context.time()) {
-            VL_FATAL_MT(__FILE__, __LINE__, "",
-                        "%Error: Encountered process that should've been resumed at an "
-                        "earlier simulation time. Missed a time slot?");
-        }
-        // Move max element in the heap to the end
-        std::pop_heap(m_queue.begin(), m_queue.end());
-        VlCoroutineHandle handle = std::move(m_queue.back().m_handle);
-        m_queue.pop_back();
+    bool resumed = false;
+
+    while (!m_queue.empty() && (m_queue.cbegin()->first == m_context.time())) {
+        VlCoroutineHandle handle = std::move(m_queue.begin()->second);
+        m_queue.erase(m_queue.begin());
         handle.resume();
+        resumed = true;
+    }
+
+    if (!m_zeroDelayed.empty()) {
+        // First, we need to move the coroutines out of the queue, as a resumed coroutine can
+        // suspend on #0 again, adding itself to the queue, which can result in reallocating the
+        // queue mid-iteration.
+        // We swap with the m_zeroDlyResumed field to keep the allocated buffer.
+        m_zeroDlyResumed.swap(m_zeroDelayed);
+        for (auto&& handle : m_zeroDlyResumed) handle.resume();
+        m_zeroDlyResumed.clear();
+        resumed = true;
+        // We are now in the Active region, so any coroutines added to m_zeroDelayed in the
+        // meantime will have to wait until the next Inactive region.
+    }
+
+    if (!resumed) {
+        VL_FATAL_MT(__FILE__, __LINE__, "",
+                    "%Error: Encountered process that should've been resumed at an "
+                    "earlier simulation time. Missed a time slot?\n");
     }
 }
 
 uint64_t VlDelayScheduler::nextTimeSlot() const {
-    if (empty()) {
+    if (!m_queue.empty()) return m_queue.cbegin()->first;
+    if (m_zeroDelayed.empty())
         VL_FATAL_MT(__FILE__, __LINE__, "", "%Error: There is no next time slot scheduled");
-    }
-    return m_queue.front().m_timestep;
+    return m_context.time();
 }
 
 #ifdef VL_DEBUG
@@ -91,7 +99,16 @@ void VlDelayScheduler::dump() const {
         VL_DBG_MSGF("         No delayed processes:\n");
     } else {
         VL_DBG_MSGF("         Delayed processes:\n");
-        for (const auto& susp : m_queue) susp.dump();
+        for (auto& susp : m_zeroDelayed) {
+            VL_DBG_MSGF("             Awaiting #0-delayed resumption, "
+                        "time () %" PRIu64 ": ",
+                        m_context.time());
+            susp.dump();
+        }
+        for (const auto& susp : m_queue) {
+            VL_DBG_MSGF("             Awaiting time %" PRIu64 ": ", susp.first);
+            susp.second.dump();
+        }
     }
 }
 #endif

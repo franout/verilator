@@ -2,7 +2,7 @@
 //*************************************************************************
 // Code available from: https://verilator.org
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -56,6 +56,11 @@ public:
         of.puts("\n");
         of.puts("#include \"" + symClassName() + ".h\"\n");
         of.puts("#include \"" + topClassName() + ".h\"\n");
+
+        of.puts("\n// Additional include files added using '--compiler-include'\n");
+        for (const string& filename : v3Global.opt.compilerIncludes()) {
+            of.puts("#include \"" + filename + "\"\n");
+        }
 
         of.putsEndGuard();
     }

@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2001-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2001-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -12,7 +12,7 @@
 //=============================================================================
 //
 // Verilated tracing implementation code template common to all formats.
-// This file is included by the format specific implementations and
+// This file is included by the format-specific implementations and
 // should not be used otherwise.
 //
 //=============================================================================
@@ -31,7 +31,7 @@
 
 #if 0
 # include <iostream>
-# define VL_TRACE_OFFLOAD_DEBUG(msg) std::cout << "TRACE OFFLOAD THREAD: " << msg << std::endl
+# define VL_TRACE_OFFLOAD_DEBUG(msg) std::cout << "TRACE OFFLOAD THREAD: " << msg << "\n"
 #else
 # define VL_TRACE_OFFLOAD_DEBUG(msg)
 #endif
@@ -185,18 +185,21 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::offloadWorkerThreadMain() {
                 continue;
             case VerilatedTraceOffloadCommand::CHG_EVENT:
                 VL_TRACE_OFFLOAD_DEBUG("Command CHG_EVENT " << top);
-                traceBufp->chgEvent(oldp, reinterpret_cast<const VlEventBase*>(readp));
+                traceBufp->chgEventTriggered(oldp);
                 continue;
 
                 //===
                 // Rare commands
-            case VerilatedTraceOffloadCommand::TIME_CHANGE:
+            case VerilatedTraceOffloadCommand::TIME_CHANGE: {
                 VL_TRACE_OFFLOAD_DEBUG("Command TIME_CHANGE " << top);
                 readp -= 1;  // No code in this command, undo increment
-                emitTimeChange(*reinterpret_cast<const uint64_t*>(readp));
+                const uint64_t timeui
+                    = static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(readp)) << 32ULL
+                      | static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(readp + 1));
+                emitTimeChange(timeui);
                 readp += 2;
                 continue;
-
+            }
             case VerilatedTraceOffloadCommand::TRACE_BUFFER:
                 VL_TRACE_OFFLOAD_DEBUG("Command TRACE_BUFFER " << top);
                 readp -= 1;  // No code in this command, undo increment
@@ -312,7 +315,7 @@ VerilatedTrace<VL_SUB_T, VL_BUF_T>::~VerilatedTrace() {
 }
 
 //=========================================================================
-// Internals available to format specific implementations
+// Internals available to format-specific implementations
 
 template <>
 void VerilatedTrace<VL_SUB_T, VL_BUF_T>::traceInit() VL_MT_UNSAFE {
@@ -328,10 +331,7 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::traceInit() VL_MT_UNSAFE {
     // Call all initialize callbacks, which will:
     // - Call decl* for each signal (these eventually call ::declCode)
     // - Store the base code
-    for (uint32_t i = 0; i < m_initCbs.size(); ++i) {
-        const CallbackRecord& cbr = m_initCbs[i];
-        cbr.m_initCb(cbr.m_userp, self(), nextCode());
-    }
+    for (const CallbackRecord& cbr : m_initCbs) cbr.m_initCb(cbr.m_userp, self(), nextCode());
 
     if (expectedCodes && nextCode() != expectedCodes) {
         VL_FATAL_MT(__FILE__, __LINE__, "",
@@ -417,11 +417,11 @@ bool VerilatedTrace<VL_SUB_T, VL_BUF_T>::declCode(uint32_t code, const std::stri
 }
 
 //=========================================================================
-// Internals available to format specific implementations
+// Internals available to format-specific implementations
 
 template <>
 std::string VerilatedTrace<VL_SUB_T, VL_BUF_T>::timeResStr() const {
-    return doubleToTimescale(m_timeRes);
+    return vl_timescaled_double(m_timeRes);
 }
 
 //=========================================================================
@@ -559,7 +559,7 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::dump(uint64_t timeui) VL_MT_SAFE_EXCLUD
 
     Verilated::quiesce();
 
-    // Call hook for format specific behaviour
+    // Call hook for format-specific behaviour
     if (VL_UNLIKELY(m_fullDump)) {
         if (!preFullDump()) return;
     } else {
@@ -577,7 +577,10 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::dump(uint64_t timeui) VL_MT_SAFE_EXCLUD
 
             // Tell worker to update time point
             m_offloadBufferWritep[0] = VerilatedTraceOffloadCommand::TIME_CHANGE;
-            *reinterpret_cast<uint64_t*>(m_offloadBufferWritep + 1) = timeui;
+            *reinterpret_cast<uint32_t*>(m_offloadBufferWritep + 1)
+                = static_cast<uint32_t>(timeui >> 32ULL);
+            *reinterpret_cast<uint32_t*>(m_offloadBufferWritep + 2)
+                = static_cast<uint32_t>(timeui);
             m_offloadBufferWritep += 3;
         } else {
             // Update time point
@@ -614,10 +617,7 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::dump(uint64_t timeui) VL_MT_SAFE_EXCLUD
         }
     }
 
-    for (uint32_t i = 0; i < m_cleanupCbs.size(); ++i) {
-        const CallbackRecord& cbr = m_cleanupCbs[i];
-        cbr.m_cleanupCb(cbr.m_userp, self());
-    }
+    for (const CallbackRecord& cbr : m_cleanupCbs) cbr.m_cleanupCb(cbr.m_userp, self());
 
     if (offload() && VL_LIKELY(bufferp)) {
         // Mark end of the offload buffer we just filled
@@ -649,12 +649,13 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::addModel(VerilatedModel* modelp)
 
     // Validate
     if (!newModel) {  // LCOV_EXCL_START
-        VL_FATAL_MT(__FILE__, __LINE__, "",
-                    "The same model has already been added to this trace file");
+        VL_FATAL_MT(
+            __FILE__, __LINE__, "",
+            "The same model has already been added to this trace file or VerilatedContext");
     }
     if (VL_UNCOVERABLE(m_contextp && contextp != m_contextp)) {
         VL_FATAL_MT(__FILE__, __LINE__, "",
-                    "A trace file instance can only handle models from the same context");
+                    "A trace file instance can only handle models from the same VerilatedContext");
     }
     if (VL_UNCOVERABLE(m_didSomeDump)) {
         VL_FATAL_MT(__FILE__, __LINE__, "",
@@ -682,7 +683,7 @@ void VerilatedTrace<VL_SUB_T, VL_BUF_T>::addModel(VerilatedModel* modelp)
         VL_FATAL_MT(__FILE__, __LINE__, "", "Cannot use parallel tracing with offloading");
     }  // LCOV_EXCL_STOP
 
-    // Configure format specific sub class
+    // Configure format-specific sub class
     configure(*(configp.get()));
 }
 
@@ -833,8 +834,8 @@ VerilatedTraceBuffer<VL_BUF_T>::VerilatedTraceBuffer(Trace& owner)
     , m_sigs_enabledp{owner.m_sigs_enabledp} {}
 
 // These functions must write the new value back into the old value store,
-// and subsequently call the format specific emit* implementations. Note
-// that this file must be included in the format specific implementation, so
+// and subsequently call the format-specific emit* implementations. Note
+// that this file must be included in the format-specific implementation, so
 // the emit* functions can be inlined for performance.
 
 template <>
@@ -846,10 +847,17 @@ void VerilatedTraceBuffer<VL_BUF_T>::fullBit(uint32_t* oldp, CData newval) {
 }
 
 template <>
-void VerilatedTraceBuffer<VL_BUF_T>::fullEvent(uint32_t* oldp, const VlEventBase* newval) {
+void VerilatedTraceBuffer<VL_BUF_T>::fullEvent(uint32_t* oldp, const VlEventBase* newvalp) {
     const uint32_t code = oldp - m_sigs_oldvalp;
-    *oldp = 1;  // Do we really store an "event" ?
-    emitEvent(code, newval);
+    // No need to update *oldp
+    if (newvalp->isTriggered()) emitEvent(code);
+}
+
+template <>
+void VerilatedTraceBuffer<VL_BUF_T>::fullEventTriggered(uint32_t* oldp) {
+    const uint32_t code = oldp - m_sigs_oldvalp;
+    // No need to update *oldp
+    emitEvent(code);
 }
 
 template <>

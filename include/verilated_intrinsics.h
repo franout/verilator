@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you can
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you can
 // redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -12,13 +12,13 @@
 //*************************************************************************
 ///
 /// \file
-/// \brief Verilator common target specific intrinsics header
+/// \brief Verilator common target-specific intrinsics header
 ///
 /// This file is not part of the Verilated public-facing API.
 ///
-/// It is only for internal use; code using machine specific intrinsics for
+/// It is only for internal use; code using machine-specific intrinsics for
 /// optimization should include this header rather than directly including
-/// he target specific headers. We provide macros to check for availability
+/// the target-specific headers. We provide macros to check for availability
 /// of instruction sets, and a common mechanism to disable them.
 ///
 //*************************************************************************

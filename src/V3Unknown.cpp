@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -41,7 +41,6 @@ VL_DEFINE_DEBUG_FUNCTIONS;
 //######################################################################
 
 class UnknownVisitor final : public VNVisitor {
-private:
     // NODE STATE
     // Cleared on Netlist
     //  AstSel::user()          -> bool.  Set true if already processed
@@ -192,6 +191,11 @@ private:
             m_constXCvt = false;  // Avoid losing the X's in casex
             iterateChildren(nodep);
         }
+    }
+    void visit(AstVar* nodep) override {
+        VL_RESTORER(m_allowXUnique);
+        if (nodep->isParam()) m_allowXUnique = false;
+        iterateChildren(nodep);
     }
     void visitEqNeqCase(AstNodeBiop* nodep) {
         UINFO(4, " N/EQCASE->EQ " << nodep << endl);
@@ -406,8 +410,10 @@ private:
                 nodep->unlinkFrBack(&replaceHandle);
                 V3Number xnum{nodep, nodep->width()};
                 xnum.setAllBitsX();
-                AstNode* const newp = new AstCondBound{nodep->fileline(), condp, nodep,
-                                                       new AstConst{nodep->fileline(), xnum}};
+                AstNodeExpr* const xexprp = new AstConst{nodep->fileline(), xnum};
+                AstNodeExpr* const newp
+                    = condp->isZero() ? xexprp
+                                      : new AstCondBound{nodep->fileline(), condp, nodep, xexprp};
                 if (debug() >= 9) newp->dumpTree("-        _new: ");
                 // Link in conditional
                 replaceHandle.relink(newp);
@@ -440,11 +446,9 @@ private:
             int declElements = -1;
             AstNodeDType* const dtypep = nodep->fromp()->dtypep()->skipRefp();
             UASSERT_OBJ(dtypep, nodep, "Select of non-selectable type");
-            if (const AstNodeArrayDType* const adtypep = VN_CAST(dtypep, NodeArrayDType)) {
-                declElements = adtypep->elementsConst();
-            } else {
-                nodep->v3error("Select from non-array " << dtypep->prettyTypeName());
-            }
+            const AstNodeArrayDType* const adtypep = VN_CAST(dtypep, NodeArrayDType);
+            UASSERT_OBJ(adtypep, nodep, "Select from non-array " << dtypep->prettyTypeName());
+            declElements = adtypep->elementsConst();
             if (debug() >= 9) nodep->dumpTree("-  arraysel_old: ");
 
             // If value MODDIV constant, where constant <= declElements, known ok
@@ -467,17 +471,18 @@ private:
                              nodep->bitp()->cloneTreePure(false)};
             // Note below has null backp(); the Edit function knows how to deal with that.
             condp = V3Const::constifyEdit(condp);
+            AstNodeDType* nodeDtp = nodep->dtypep()->skipRefp();
             if (condp->isOne()) {
                 // We don't need to add a conditional; we know the existing expression is ok
                 VL_DO_DANGLING(condp->deleteTree(), condp);
             } else if (!lvalue
                        // Making a scalar would break if we're making an array
-                       && !VN_IS(nodep->dtypep()->skipRefp(), NodeArrayDType)) {
+                       && VN_IS(nodeDtp, BasicDType)) {
                 // ARRAYSEL(...) -> COND(LT(bit<maxbit), ARRAYSEL(...), {width{1'bx}})
                 VNRelinker replaceHandle;
                 nodep->unlinkFrBack(&replaceHandle);
                 V3Number xnum{nodep, nodep->width()};
-                if (nodep->isString()) {
+                if (nodeDtp->isString()) {
                     xnum = V3Number{V3Number::String{}, nodep, ""};
                 } else {
                     xnum.setAllBitsX();
@@ -526,5 +531,5 @@ public:
 void V3Unknown::unknownAll(AstNetlist* nodep) {
     UINFO(2, __FUNCTION__ << ": " << endl);
     { UnknownVisitor{nodep}; }  // Destruct before checking
-    V3Global::dumpCheckGlobalTree("unknown", 0, dumpTreeLevel() >= 3);
+    V3Global::dumpCheckGlobalTree("unknown", 0, dumpTreeEitherLevel() >= 3);
 }

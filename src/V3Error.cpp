@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -23,11 +23,12 @@
 # include "V3Stats.h"
 VL_DEFINE_DEBUG_FUNCTIONS;
 #endif
+#include <thread>
 // clang-format on
 
 //======================================================================
 
-struct v3errorIniter {
+struct v3errorIniter final {
     v3errorIniter() { V3Error::init(); }
 };
 v3errorIniter v3errorInit;
@@ -53,25 +54,11 @@ V3ErrorCode::V3ErrorCode(const char* msgp) {
 //
 
 bool V3ErrorGuarded::isError(V3ErrorCode code, bool supp) VL_REQUIRES(m_mutex) {
-    if (supp) {
-        return false;
-    } else if (code == V3ErrorCode::USERINFO) {
-        return false;
-    } else if (code == V3ErrorCode::EC_INFO) {
-        return false;
-    } else if (code == V3ErrorCode::EC_FATAL) {
-        return true;
-    } else if (code == V3ErrorCode::EC_FATALEXIT) {
-        return true;
-    } else if (code == V3ErrorCode::EC_FATALSRC) {
-        return true;
-    } else if (code == V3ErrorCode::EC_ERROR) {
-        return true;
-    } else if (code < V3ErrorCode::EC_FIRST_WARN || pretendError(code)) {
-        return true;
-    } else {
-        return false;
-    }
+    if (code.hardError()) return true;
+    if (supp) return false;
+    if (code == V3ErrorCode::USERINFO || code == V3ErrorCode::EC_INFO) return false;
+    if (pretendError(code)) return true;
+    return false;
 }
 
 string V3ErrorGuarded::msgPrefix() VL_REQUIRES(m_mutex) {
@@ -102,7 +89,18 @@ void V3ErrorGuarded::vlAbortOrExit() VL_REQUIRES(m_mutex) {
     if (V3Error::debugDefault()) {
         std::cerr << msgPrefix() << "Aborting since under --debug" << endl;
         V3Error::vlAbort();
-    } else {
+    }
+#ifndef V3ERROR_NO_GLOBAL_
+    else if (v3Global.opt.verilateJobs() > 1
+             && v3Global.mainThreadId() != std::this_thread::get_id()) {
+        VL_GCOV_DUMP();  // No static destructors are called, thus must be called manually.
+
+        // Exit without triggering any global destructors.
+        // Used to prevent detached V3ThreadPool jobs accessing destroyed static objects.
+        ::_exit(1);
+    }
+#endif
+    else {
         std::exit(1);
     }
 }
@@ -111,7 +109,7 @@ string V3ErrorGuarded::warnMore() VL_REQUIRES(m_mutex) { return string(msgPrefix
 
 void V3ErrorGuarded::suppressThisWarning() VL_REQUIRES(m_mutex) {
 #ifndef V3ERROR_NO_GLOBAL_
-    V3Stats::addStatSum(std::string{"Warnings, Suppressed "} + errorCode().ascii(), 1);
+    V3Stats::addStatSum("Warnings, Suppressed "s + errorCode().ascii(), 1);
 #endif
     errorSuppressed(true);
 }
@@ -125,7 +123,7 @@ void V3ErrorGuarded::v3errorEnd(std::ostringstream& sstr, const string& extra)
     // Skip suppressed messages
     if (m_errorSuppressed
         // On debug, show only non default-off warning to prevent pages of warnings
-        && (!debug() || m_errorCode.defaultsOff()))
+        && (!debug() || debug() < 3 || m_errorCode.defaultsOff()))
         return;
     string msg = msgPrefix() + sstr.str();
     // If suppressed print only first line to reduce verbosity
@@ -180,7 +178,7 @@ void V3ErrorGuarded::v3errorEnd(std::ostringstream& sstr, const string& extra)
         }
         if (!m_describedEachWarn[m_errorCode] && !m_pretendError[m_errorCode]) {
             m_describedEachWarn[m_errorCode] = true;
-            if (m_errorCode >= V3ErrorCode::EC_FIRST_WARN && !m_describedWarnings) {
+            if (!m_errorCode.hardError() && !m_describedWarnings) {
                 m_describedWarnings = true;
                 std::cerr << warnMore() << "... Use \"/* verilator lint_off "
                           << m_errorCode.ascii()
@@ -193,7 +191,7 @@ void V3ErrorGuarded::v3errorEnd(std::ostringstream& sstr, const string& extra)
                           << endl;
             }
         }
-        if (!msg_additional.empty()) { std::cerr << msg_additional; }
+        if (!msg_additional.empty()) std::cerr << msg_additional;
         // If first warning is not the user's fault (internal/unsupported) then give the website
         // Not later warnings, as a internal may be caused by an earlier problem
         if (tellManual() == 0) {
@@ -221,19 +219,20 @@ void V3ErrorGuarded::v3errorEnd(std::ostringstream& sstr, const string& extra)
                     tellManual(2);
                 }
 #ifndef V3ERROR_NO_GLOBAL_
-                if (dumpTreeLevel() || debug()) {
+                if (dumpTreeLevel() || dumpTreeJsonLevel() || debug()) {
                     V3Broken::allowMidvisitorCheck(true);
-                    const V3ThreadPool::ScopedExclusiveAccess exclusiveAccess;
                     if (dumpTreeLevel()) {
                         v3Global.rootp()->dumpTreeFile(v3Global.debugFilename("final.tree", 990));
+                    }
+                    if (dumpTreeJsonLevel()) {
+                        v3Global.rootp()->dumpTreeJsonFile(
+                            v3Global.debugFilename("final.tree.json", 990));
                     }
                     if (debug()) {
                         execErrorExitCb();
                         V3Stats::statsFinalAll(v3Global.rootp());
                         V3Stats::statsReport();
                     }
-                    // Abort in exclusive access to make sure other threads
-                    // don't change error code
                     vlAbortOrExit();
                 }
 #endif
@@ -256,9 +255,8 @@ void V3Error::init() {
         describedEachWarn(static_cast<V3ErrorCode>(i), false);
         pretendError(static_cast<V3ErrorCode>(i), V3ErrorCode{i}.pretendError());
     }
-    if (VL_UNCOVERABLE(string{V3ErrorCode{V3ErrorCode::_ENUM_MAX}.ascii()} != " MAX")) {
-        v3fatalSrc("Enum table in V3ErrorCode::EC_ascii() is munged");
-    }
+    UASSERT(std::string{V3ErrorCode{V3ErrorCode::_ENUM_MAX}.ascii()} == " MAX",
+            "Enum table in V3ErrorCode::EC_ascii() is munged");
 }
 
 string V3Error::lineStr(const char* filename, int lineno) VL_PURE {
@@ -287,27 +285,14 @@ void V3Error::vlAbort() {
     VL_GCOV_DUMP();
     std::abort();
 }
-void V3Error::v3errorAcquireLock(bool mtDisabledCodeUnit) VL_ACQUIRE(s().m_mutex) {
-#if !defined(V3ERROR_NO_GLOBAL_)
-    if (!mtDisabledCodeUnit) {
-        V3Error::s().m_mutex.lockCheckStopRequest(
-            []() -> void { V3ThreadPool::s().waitIfStopRequested(); });
-    } else {
-        V3Error::s().m_mutex.lock();
-    }
-#else
+std::ostringstream& V3Error::v3errorPrep(V3ErrorCode code) VL_ACQUIRE(s().m_mutex) {
     V3Error::s().m_mutex.lock();
-#endif
-}
-std::ostringstream& V3Error::v3errorPrep(V3ErrorCode code, bool mtDisabledCodeUnit)
-    VL_ACQUIRE(s().m_mutex) {
-    v3errorAcquireLock(mtDisabledCodeUnit);
     s().v3errorPrep(code);
     return v3errorStr();
 }
-std::ostringstream& V3Error::v3errorPrepFileLine(V3ErrorCode code, const char* file, int line,
-                                                 bool mtDisabledCodeUnit) VL_ACQUIRE(s().m_mutex) {
-    v3errorPrep(code, mtDisabledCodeUnit) << file << ":" << std::dec << line << ": ";
+std::ostringstream& V3Error::v3errorPrepFileLine(V3ErrorCode code, const char* file, int line)
+    VL_ACQUIRE(s().m_mutex) {
+    v3errorPrep(code) << file << ":" << std::dec << line << ": ";
     return v3errorStr();
 }
 std::ostringstream& V3Error::v3errorStr() VL_REQUIRES(s().m_mutex) { return s().v3errorStr(); }

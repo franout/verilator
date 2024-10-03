@@ -1,4 +1,4 @@
-.. Copyright 2003-2023 by Wilson Snyder.
+.. Copyright 2003-2024 by Wilson Snyder.
 .. SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
 
 *****
@@ -48,12 +48,6 @@ For --cc/--sc, it creates:
      - Make include file for compiling (from --make gmake)
    * - *{prefix}*\ _classes.mk
      - Make include file with class names (from --make gmake)
-   * - *{prefix}*\ _hier.mk
-     - Make file for hierarchy blocks (from --make gmake)
-   * - *{prefix}*\ _hierMkArgs.f
-     - Arguments for hierarchical Verilation (from --make gmake)
-   * - *{prefix}*\ _hierCMakeArgs.f
-     - Arguments for hierarchical Verilation (from --make cmake)
    * - *{prefix}*\ .h
      - Model header
    * - *{prefix}*\ .cpp
@@ -95,16 +89,24 @@ For --cc/--sc, it creates:
    * - *{prefix}{each_verilog_module}{__DepSet_hash__n}*\ .cpp
      - Additional lower C++ files (hashed to reduce build times)
 
-For --hierarchy mode, it creates:
+For --hierarchical mode, it creates:
 
 .. list-table::
 
    * - V\ *{hier_block}*\ /
-     - Directory to Verilate each hierarchy block (from --hierarchy)
+     - Directory to Verilate each hierarchical block (from --hierarchical)
    * - *{prefix}*\ __hierVer.d
-     - Make dependencies of the top module (from --hierarchy)
+     - Make dependencies of the top module (from --hierarchical)
+   * - *{prefix}*\ _hier.mk
+     - Make file for hierarchical blocks (from --make gmake)
+   * - *{prefix}*\ __hierCMakeArgs.f
+     - Arguments for hierarchical Verilation (from --make cmake)
+   * - *{prefix}*\ __hierMkArgs.f
+     - Arguments for hierarchical Verilation (from --make gmake)
+   * - *{prefix}*\ __hierParameters.v
+     - Module parameters for hierarchical blocks
    * - *{prefix}*\ __hier.dir
-     - Directory to store .dot, .vpp, .tree of top module (from --hierarchy)
+     - Directory to store .dot, .vpp, .tree of top module (from --hierarchical)
 
 In specific debug and other modes, it also creates:
 
@@ -112,6 +114,10 @@ In specific debug and other modes, it also creates:
 
    * - *{prefix}*\ .xml
      - XML tree information (from --xml)
+   * - *{prefix}*\ .tree.json
+     - JSON tree information (from --json-only)
+   * - *{prefix}*\ .tree.meta.json
+     - JSON tree metadata (from --json-only)
    * - *{prefix}*\ __cdc.txt
      - Clock Domain Crossing checks (from --cdc)
    * - *{prefix}*\ __stats.txt
@@ -145,6 +151,10 @@ After running Make, the C++ compiler may produce the following:
      - Intermediate objects
    * - *{prefix}*\
      - Final executable (from --exe)
+   * - lib\ *{prefix}*\ .a
+     - Final archive (default lib mode)
+   * - libverilated.a
+     - Runtime for verilated model (default lib mode)
    * - *{prefix}*\ __ALL.a
      - Library of all Verilated objects
    * - *{prefix}*\ __ALL.cpp

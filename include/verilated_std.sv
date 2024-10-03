@@ -4,7 +4,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2022-2023 by Wilson Snyder. This program is free software; you can
+// Copyright 2022-2024 by Wilson Snyder. This program is free software; you can
 // redistribute it and/or modify it under the terms of either the GNU Lesser
 // General Public License Version 3 or the Perl Artistic License Version 2.0.
 // SPDX-License-Identifier: LGPL-3.0-only OR Artistic-2.0
@@ -40,7 +40,7 @@ package std;
 
       task put(T message);
 `ifdef VERILATOR_TIMING
-         if (m_bound != 0)
+         while (m_bound != 0 && m_queue.size() >= m_bound)
             wait (m_queue.size() < m_bound);
          m_queue.push_back(message);
 `endif
@@ -56,7 +56,9 @@ package std;
 
       task get(ref T message);
 `ifdef VERILATOR_TIMING
-         wait (m_queue.size() > 0);
+         while (m_queue.size() == 0) begin
+            wait (m_queue.size() > 0);
+         end
          message = m_queue.pop_front();
 `endif
       endtask
@@ -71,7 +73,9 @@ package std;
 
       task peek(ref T message);
 `ifdef VERILATOR_TIMING
-         wait (m_queue.size() > 0);
+         while (m_queue.size() == 0) begin
+            wait (m_queue.size() > 0);
+         end
          message = m_queue[0];
 `endif
       endtask
@@ -98,7 +102,9 @@ package std;
 
       task get(int keyCount = 1);
 `ifdef VERILATOR_TIMING
-         wait (m_keyCount >= keyCount);
+         while (m_keyCount < keyCount) begin
+            wait (m_keyCount >= keyCount);
+         end
          m_keyCount -= keyCount;
 `endif
       endtask
@@ -189,4 +195,7 @@ package std;
          $urandom(s.atoi());  // Set the seed using a string
       endfunction
    endclass
+   function int randomize();
+      randomize = 0;
+   endfunction
 endpackage

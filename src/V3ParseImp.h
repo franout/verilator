@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2009-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2009-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -25,7 +25,6 @@
 #include "V3Global.h"
 #include "V3Parse.h"
 #include "V3ParseSym.h"
-#include "V3ThreadSafety.h"
 
 #include <algorithm>
 #include <deque>
@@ -45,7 +44,7 @@ enum V3ImportProperty : uint8_t { iprop_NONE, iprop_CONTEXT, iprop_PURE };
 //============================================================================
 // Member qualifiers
 
-struct VMemberQualifiers {
+struct VMemberQualifiers final {
     union {
         uint32_t m_flags;
         struct {
@@ -82,8 +81,8 @@ struct VMemberQualifiers {
     }
     void applyToNodes(AstVar* nodesp) const {
         for (AstVar* nodep = nodesp; nodep; nodep = VN_AS(nodep->nextp(), Var)) {
-            if (m_rand) nodep->isRand(true);
-            if (m_randc) nodep->isRandC(true);
+            if (m_rand) nodep->rand(VRandAttr::RAND);
+            if (m_randc) nodep->rand(VRandAttr::RAND_CYCLIC);
             if (m_local) nodep->isHideLocal(true);
             if (m_protected) nodep->isHideProtected(true);
             if (m_static) nodep->lifetime(VLifetime::STATIC);
@@ -99,10 +98,11 @@ struct VMemberQualifiers {
 // Parser YYSType, e.g. for parser's yylval
 // We can't use bison's %union as we want to pass the fileline with all tokens
 
-struct V3ParseBisonYYSType {
+struct V3ParseBisonYYSType final {
     FileLine* fl;
     AstNode* scp;  // Symbol table scope for future lookups
     int token;  // Read token, aka tok
+    VBaseOverride baseOverride;
     union {
         V3Number* nump;
         string* strp;
@@ -115,6 +115,8 @@ struct V3ParseBisonYYSType {
         VSigning::en signstate;
         V3ErrorCode::en errcodeen;
         VAttrType::en attrtypeen;
+        VAssertType::en asserttypeen;
+        VAssertDirectiveType::en assertdirectivetypeen;
         VLifetime::en lifetime;
         VStrength::en strength;
 
@@ -152,6 +154,7 @@ class V3ParseImp final {
     std::deque<V3Number*> m_numberps;  // Created numbers for later cleanup
     std::deque<FileLine> m_lexLintState;  // Current lint state for save/restore
     std::deque<string> m_ppBuffers;  // Preprocessor->lex buffer of characters to process
+    size_t m_ppBytes = 0;  // Preprocessor->lex bytes transferred
 
     AstNode* m_tagNodep = nullptr;  // Points to the node to set to m_tag or nullptr to not set.
     VTimescale m_timeLastUnit;  // Last `timescale's unit
@@ -202,6 +205,7 @@ public:
 
     void ppPushText(const string& text) {
         m_ppBuffers.push_back(text);
+        m_ppBytes += text.length();
         if (lexFileline()->contentp()) lexFileline()->contentp()->pushText(text);
     }
     size_t ppInputToLex(char* buf, size_t max_size) VL_MT_DISABLED;
@@ -290,6 +294,7 @@ public:
     void parseFile(FileLine* fileline, const string& modfilename, bool inLibrary,
                    const string& errmsg) VL_MT_DISABLED;
     void dumpInputsFile() VL_MT_DISABLED;
+    static void candidatePli(VSpellCheck* spellerp) VL_MT_DISABLED;
 
 private:
     void preprocDumps(std::ostream& os);
@@ -297,9 +302,10 @@ private:
     void yylexReadTok() VL_MT_DISABLED;
     void tokenPull() VL_MT_DISABLED;
     void tokenPipeline() VL_MT_DISABLED;  // Internal; called from tokenToBison
+    int tokenPipelineId(int token) VL_MT_DISABLED;
     void tokenPipelineSym() VL_MT_DISABLED;
     size_t tokenPipeScanParam(size_t depth) VL_MT_DISABLED;
-    size_t tokenPipeScanType(size_t depth) VL_MT_DISABLED;
+    size_t tokenPipeScanTypeEq(size_t depth) VL_MT_DISABLED;
     const V3ParseBisonYYSType* tokenPeekp(size_t depth) VL_MT_DISABLED;
     void preprocDumps(std::ostream& os, bool forInputs) VL_MT_DISABLED;
 };

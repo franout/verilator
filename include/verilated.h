@@ -3,7 +3,7 @@
 //
 // Code available from: https://verilator.org
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you can
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you can
 // redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -55,6 +55,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <set>
@@ -72,6 +73,8 @@
 # include VL_VERILATED_INCLUDE
 #endif
 // clang-format on
+
+using namespace std::literals;  // "<std::string literal>"s; see SF.7 core guideline
 
 //=============================================================================
 // Switches
@@ -99,6 +102,7 @@ class VerilatedScope;
 class VerilatedScopeNameMap;
 template <class, class>
 class VerilatedTrace;
+class VerilatedTraceBaseC;
 class VerilatedTraceConfig;
 class VerilatedVar;
 class VerilatedVarNameMap;
@@ -150,6 +154,27 @@ enum VerilatedVarFlags {
     VLVF_DPI_CLAY = (1 << 10)  // DPI compatible C standard layout
 };
 
+// IEEE 1800-2023 Table 20-6
+enum class VerilatedAssertType : uint8_t {
+    ASSERT_TYPE_CONCURRENT = (1 << 0),
+    ASSERT_TYPE_SIMPLE_IMMEDIATE = (1 << 1),
+    ASSERT_TYPE_OBSERVED_DEFERRED_IMMEDIATE = (1 << 2),
+    ASSERT_TYPE_FINAL_DEFERRED_IMMEDIATE = (1 << 3),
+    ASSERT_TYPE_EXPECT = (1 << 4),
+    ASSERT_TYPE_UNIQUE = (1 << 5),
+    ASSERT_TYPE_UNIQUE0 = (1 << 6),
+    ASSERT_TYPE_PRIORITY = (1 << 7),
+};
+
+// IEEE 1800-2023 Table 20-7
+enum class VerilatedAssertDirectiveType : uint8_t {
+    DIRECTIVE_TYPE_ASSERT = (1 << 0),
+    DIRECTIVE_TYPE_COVER = (1 << 1),
+    DIRECTIVE_TYPE_ASSUME = (1 << 2),
+};
+using VerilatedAssertType_t = std::underlying_type<VerilatedAssertType>::type;
+using VerilatedAssertDirectiveType_t = std::underlying_type<VerilatedAssertDirectiveType>::type;
+
 //=============================================================================
 // Utility functions
 
@@ -196,19 +221,6 @@ public:
     void unlock() VL_RELEASE() VL_MT_SAFE { m_mutex.unlock(); }
     /// Try to acquire mutex.  Returns true on success, and false on failure.
     bool try_lock() VL_TRY_ACQUIRE(true) VL_MT_SAFE { return m_mutex.try_lock(); }
-    /// Acquire/lock mutex and check for stop request
-    /// It tries to lock the mutex and if it fails, it check if stop request was send.
-    /// It returns after locking mutex.
-    /// This function should be extracted to V3ThreadPool, but due to clang thread-safety
-    /// limitations it needs to be placed here.
-    void lockCheckStopRequest(std::function<void()> checkStopRequestFunction)
-        VL_ACQUIRE() VL_MT_SAFE {
-        while (true) {
-            checkStopRequestFunction();
-            if (m_mutex.try_lock()) return;
-            VL_CPU_RELAX();
-        }
-    }
 };
 
 /// Lock guard for mutex (ala std::unique_lock), wrapped to allow -fthread_safety checks
@@ -344,21 +356,43 @@ public:
 class VerilatedContext VL_NOT_FINAL {
     friend class VerilatedContextImp;
 
+private:
+    // MEMBERS
+    // Numer of assertion directive type members. Then each of them will represented as 1-bit in a
+    // mask.
+    static constexpr size_t ASSERT_DIRECTIVE_TYPE_MASK_WIDTH = 3;
+    // Specifies how many groups of directive type bit groups there are based on a number of
+    // assertion types.
+    // Note: we add one bit to store information whether Verilator's internal
+    // directive types are enabled, for example `violation if`s.
+    static constexpr size_t ASSERT_ON_WIDTH
+        = ASSERT_DIRECTIVE_TYPE_MASK_WIDTH * std::numeric_limits<VerilatedAssertType_t>::digits
+          + 1;
+
 protected:
+    // TYPES
+    using traceBaseModelCb_t
+        = std::function<void(VerilatedTraceBaseC*, int, int)>;  // Type of traceBaseModel callbacks
+
     // MEMBERS
     // Slow path variables
     mutable VerilatedMutex m_mutex;  // Mutex for most s_s/s_ns members
 
-    struct Serialized {  // All these members serialized/deserialized
+    struct Serialized final {  // All these members serialized/deserialized
         // No std::strings or pointers or will serialize badly!
         // Fast path
-        bool m_assertOn = true;  // Assertions are enabled
+        uint64_t m_time = 0;  // Current $time (unscaled), 0=at zero, or legacy
+        std::atomic<uint32_t> m_assertOn{
+            std::numeric_limits<uint32_t>::max()};  // Enabled assertions,
+                                                    // for each VerilatedAssertType we store
+                                                    // 3-bits, one for each directive type. Last
+                                                    // bit guards internal directive types.
         bool m_calcUnusedSigs = false;  // Waves file on, need all signals calculated
         bool m_fatalOnError = true;  // Fatal on $stop/non-fatal error
         bool m_fatalOnVpiError = true;  // Fatal on vpi error/unsupported
         bool m_gotError = false;  // A $finish statement executed
         bool m_gotFinish = false;  // A $finish or $stop statement executed
-        uint64_t m_time = 0;  // Current $time (unscaled), 0=at zero, or legacy
+        bool m_quiet = false;  // Quiet, no summary report
         // Slow path
         int8_t m_timeunit;  // Time unit as 0..15
         int8_t m_timeprecision;  // Time precision as 0..15
@@ -379,20 +413,25 @@ protected:
     std::string m_timeFormatSuffix VL_GUARDED_BY(m_timeDumpMutex);  // $timeformat printf format
     std::string m_dumpfile VL_GUARDED_BY(m_timeDumpMutex);  // $dumpfile setting
 
-    struct NonSerialized {  // Non-serialized information
+    struct NonSerialized final {  // Non-serialized information
         // These are reloaded from on command-line settings, so do not need to persist
         // Fast path
         uint64_t m_profExecStart = 1;  // +prof+exec+start time
         uint32_t m_profExecWindow = 2;  // +prof+exec+window size
         // Slow path
+        std::string m_coverageFilename;  // +coverage+file filename
         std::string m_profExecFilename;  // +prof+exec+file filename
         std::string m_profVltFilename;  // +prof+vlt filename
+        std::string m_solverProgram;  // SMT solver program
+        VlOs::DeltaCpuTime m_cpuTimeStart{false};  // CPU time, starts when create first model
+        VlOs::DeltaWallTime m_wallTimeStart{false};  // Wall time, starts when create first model
+        std::vector<traceBaseModelCb_t> m_traceBaseModelCbs;  // Callbacks to traceRegisterModel
     } m_ns;
 
     mutable VerilatedMutex m_argMutex;  // Protect m_argVec, m_argVecLoaded
     // no need to be save-restored (serialized) the
     // assumption is that the restore is allowed to pass different arguments
-    struct NonSerializedCommandArgs {
+    struct NonSerializedCommandArgs final {
         // Medium speed
         std::vector<std::string> m_argVec;  // Argument list
         bool m_argVecLoaded = false;  // Ever loaded argument list
@@ -402,6 +441,8 @@ protected:
     const std::unique_ptr<VerilatedContextImpData> m_impdatap;
     // Number of threads to use for simulation (size of m_threadPool + 1 for main thread)
     unsigned m_threads = std::thread::hardware_concurrency();
+    // Number of threads in added models
+    unsigned m_threadsInModels = 0;
     // The thread pool shared by all models added to this context
     std::unique_ptr<VerilatedVirtualBase> m_threadPool;
     // The execution profiler shared by all models added to this context
@@ -433,14 +474,23 @@ public:
 
     // METHODS - User called
 
-    /// Enable assertions
-    void assertOn(bool flag) VL_MT_SAFE;
     /// Return if assertions enabled
-    bool assertOn() const VL_MT_SAFE { return m_s.m_assertOn; }
-    /// Enable calculation of unused signals (for traces)
-    void calcUnusedSigs(bool flag) VL_MT_SAFE;
+    bool assertOn() const VL_MT_SAFE;
+    /// Enable all assertion types
+    void assertOn(bool flag) VL_MT_SAFE;
+    /// Get enabled status for given assertion types
+    bool assertOnGet(VerilatedAssertType_t type,
+                     VerilatedAssertDirectiveType_t directive) const VL_MT_SAFE;
+    /// Set enabled status for given assertion types
+    void assertOnSet(VerilatedAssertType_t types,
+                     VerilatedAssertDirectiveType_t directives) VL_MT_SAFE;
+    /// Clear enabled status for given assertion types
+    void assertOnClear(VerilatedAssertType_t types,
+                       VerilatedAssertDirectiveType_t directives) VL_MT_SAFE;
     /// Return if calculating of unused signals (for traces)
     bool calcUnusedSigs() const VL_MT_SAFE { return m_s.m_calcUnusedSigs; }
+    /// Enable calculation of unused signals (for traces)
+    void calcUnusedSigs(bool flag) VL_MT_SAFE;
     /// Record command-line arguments, for retrieval by $test$plusargs/$value$plusargs,
     /// and for parsing +verilator+ run-time arguments.
     /// This should be called before the first model is created.
@@ -455,48 +505,58 @@ public:
     /// Return VerilatedCovContext, allocate if needed
     /// Note if get unresolved reference then likely forgot to link verilated_cov.cpp
     VerilatedCovContext* coveragep() VL_MT_SAFE;
-    /// Set debug level
+    /// Return debug level
+    static inline int debug() VL_MT_SAFE;  /// Set debug level
     /// Debug is currently global, but for forward compatibility have a per-context method
     static inline void debug(int val) VL_MT_SAFE;
-    /// Return debug level
-    static inline int debug() VL_MT_SAFE;
+    /// Return current number of errors/assertions
+    int errorCount() const VL_MT_SAFE { return m_s.m_errorCount; }
     /// Set current number of errors/assertions
     void errorCount(int val) VL_MT_SAFE;
     /// Increment current number of errors/assertions
     void errorCountInc() VL_MT_SAFE;
-    /// Return current number of errors/assertions
-    int errorCount() const VL_MT_SAFE { return m_s.m_errorCount; }
-    /// Set number of errors/assertions before stop
-    void errorLimit(int val) VL_MT_SAFE;
     /// Return number of errors/assertions before stop
     int errorLimit() const VL_MT_SAFE { return m_s.m_errorLimit; }
-    /// Set to throw fatal error on $stop/non-fatal error
-    void fatalOnError(bool flag) VL_MT_SAFE;
+    /// Set number of errors/assertions before stop
+    void errorLimit(int val) VL_MT_SAFE;
     /// Return if to throw fatal error on $stop/non-fatal
     bool fatalOnError() const VL_MT_SAFE { return m_s.m_fatalOnError; }
-    /// Set to throw fatal error on VPI errors
-    void fatalOnVpiError(bool flag) VL_MT_SAFE;
+    /// Set to throw fatal error on $stop/non-fatal error
+    void fatalOnError(bool flag) VL_MT_SAFE;
     /// Return if to throw fatal error on VPI errors
     bool fatalOnVpiError() const VL_MT_SAFE { return m_s.m_fatalOnVpiError; }
-    /// Set if got a $stop or non-fatal error
-    void gotError(bool flag) VL_MT_SAFE;
+    /// Set to throw fatal error on VPI errors
+    void fatalOnVpiError(bool flag) VL_MT_SAFE;
     /// Return if got a $stop or non-fatal error
     bool gotError() const VL_MT_SAFE { return m_s.m_gotError; }
-    /// Set if got a $finish or $stop/error
-    void gotFinish(bool flag) VL_MT_SAFE;
+    /// Set if got a $stop or non-fatal error
+    void gotError(bool flag) VL_MT_SAFE;
     /// Return if got a $finish or $stop/error
     bool gotFinish() const VL_MT_SAFE { return m_s.m_gotFinish; }
+    /// Set if got a $finish or $stop/error
+    void gotFinish(bool flag) VL_MT_SAFE;
+    /// Return if quiet enabled
+    bool quiet() const VL_MT_SAFE { return m_s.m_quiet; }
+    /// Enable quiet (also prevents need for OS calls to get CPU time)
+    void quiet(bool flag) VL_MT_SAFE;
+    /// Return randReset value
+    int randReset() VL_MT_SAFE { return m_s.m_randReset; }
     /// Select initial value of otherwise uninitialized signals.
     /// 0 = Set to zeros
     /// 1 = Set all bits to one
     /// 2 = Randomize all bits
     void randReset(int val) VL_MT_SAFE;
-    /// Return randReset value
-    int randReset() VL_MT_SAFE { return m_s.m_randReset; }
-    /// Return default random seed
-    void randSeed(int val) VL_MT_SAFE;
     /// Set default random seed, 0 = seed it automatically
     int randSeed() const VL_MT_SAFE { return m_s.m_randSeed; }
+    /// Return default random seed
+    void randSeed(int val) VL_MT_SAFE;
+
+    /// Return statistic: CPU time delta from model created until now
+    double statCpuTimeSinceStart() const VL_MT_SAFE_EXCLUDES(m_mutex);
+    /// Return statistic: Wall time delta from model created until now
+    double statWallTimeSinceStart() const VL_MT_SAFE_EXCLUDES(m_mutex);
+    /// Print statistics summary (if not quiet)
+    void statsPrintSummary() VL_MT_UNSAFE;
 
     // Time handling
     /// Returns current simulation time in units of timeprecision().
@@ -541,10 +601,14 @@ public:
 
     /// Get number of threads used for simulation (including the main thread)
     unsigned threads() const { return m_threads; }
+    /// Get number of threads in added models (for statistical use only)
+    unsigned threadsInModels() const { return m_threadsInModels; }
     /// Set number of threads used for simulation (including the main thread)
     /// Can only be called before the thread pool is created (before first model is added).
     void threads(unsigned n);
 
+    /// Trace signals in models within the context; called by application code
+    void trace(VerilatedTraceBaseC* tfp, int levels, int options = 0);
     /// Allow traces to at some point be enabled (disables some optimizations)
     void traceEverOn(bool flag) VL_MT_SAFE {
         if (flag) calcUnusedSigs(true);
@@ -568,28 +632,36 @@ public:
         return reinterpret_cast<const VerilatedContextImp*>(this);
     }
 
+    // Internal: Model and thread setup
     void addModel(VerilatedModel*);
-
     VerilatedVirtualBase* threadPoolp();
     void prepareClone();
     VerilatedVirtualBase* threadPoolpOnClone();
     VerilatedVirtualBase*
     enableExecutionProfiler(VerilatedVirtualBase* (*construct)(VerilatedContext&));
 
+    // Internal: coverage
+    std::string coverageFilename() const VL_MT_SAFE;
+    void coverageFilename(const std::string& flag) VL_MT_SAFE;
+
     // Internal: $dumpfile
-    void dumpfile(const std::string& flag) VL_MT_SAFE_EXCLUDES(m_timeDumpMutex);
     std::string dumpfile() const VL_MT_SAFE_EXCLUDES(m_timeDumpMutex);
+    void dumpfile(const std::string& flag) VL_MT_SAFE_EXCLUDES(m_timeDumpMutex);
     std::string dumpfileCheck() const VL_MT_SAFE_EXCLUDES(m_timeDumpMutex);
 
     // Internal: --prof-exec related settings
-    void profExecStart(uint64_t flag) VL_MT_SAFE;
     uint64_t profExecStart() const VL_MT_SAFE { return m_ns.m_profExecStart; }
-    void profExecWindow(uint64_t flag) VL_MT_SAFE;
+    void profExecStart(uint64_t flag) VL_MT_SAFE;
     uint32_t profExecWindow() const VL_MT_SAFE { return m_ns.m_profExecWindow; }
-    void profExecFilename(const std::string& flag) VL_MT_SAFE;
+    void profExecWindow(uint64_t flag) VL_MT_SAFE;
     std::string profExecFilename() const VL_MT_SAFE;
-    void profVltFilename(const std::string& flag) VL_MT_SAFE;
+    void profExecFilename(const std::string& flag) VL_MT_SAFE;
     std::string profVltFilename() const VL_MT_SAFE;
+    void profVltFilename(const std::string& flag) VL_MT_SAFE;
+
+    // Internal: SMT solver program
+    std::string solverProgram() const VL_MT_SAFE;
+    void solverProgram(const std::string& flag) VL_MT_SAFE;
 
     // Internal: Find scope
     const VerilatedScope* scopeFind(const char* namep) const VL_MT_SAFE;
@@ -598,6 +670,9 @@ public:
     // Internal: Serialization setup
     static constexpr size_t serialized1Size() VL_PURE { return sizeof(m_s); }
     void* serialized1Ptr() VL_MT_UNSAFE { return &m_s; }
+
+    // Internal: trace registration
+    void traceBaseModelCbAdd(traceBaseModelCb_t cb) VL_MT_SAFE;
 
     // Internal: Check magic number
     static void checkMagic(const VerilatedContext* contextp);
@@ -627,8 +702,9 @@ class VerilatedScope final {
 public:
     enum Type : uint8_t {
         SCOPE_MODULE,
-        SCOPE_OTHER
-    };  // Type of a scope, currently module is only interesting
+        SCOPE_OTHER,
+        SCOPE_PACKAGE
+    };  // Type of a scope, currently only module and package are interesting
 private:
     // Fastpath:
     VerilatedSyms* m_symsp = nullptr;  // Symbol table
@@ -720,8 +796,6 @@ class Verilated final {
 public:
     // METHODS - User called
 
-    /// Enable debug of internal verilated code
-    static void debug(int level) VL_MT_SAFE;
 #ifdef VL_DEBUG
     /// Return debug level
     /// When multithreaded this may not immediately react to another thread
@@ -731,6 +805,8 @@ public:
     /// Return constant 0 debug level, so C++'s optimizer rips up
     static constexpr int debug() VL_PURE { return 0; }
 #endif
+    /// Enable debug of internal verilated code
+    static void debug(int level) VL_MT_SAFE;
 
     /// Set the last VerilatedContext accessed
     /// Generally threadContextp(value) should be called instead
@@ -762,17 +838,17 @@ public:
     }
 
 #ifndef VL_NO_LEGACY
-    /// Call VerilatedContext::assertOn using current thread's VerilatedContext
-    static void assertOn(bool flag) VL_MT_SAFE { Verilated::threadContextp()->assertOn(flag); }
     /// Return VerilatedContext::assertOn() using current thread's VerilatedContext
     static bool assertOn() VL_MT_SAFE { return Verilated::threadContextp()->assertOn(); }
-    /// Call VerilatedContext::calcUnusedSigs using current thread's VerilatedContext
-    static void calcUnusedSigs(bool flag) VL_MT_SAFE {
-        Verilated::threadContextp()->calcUnusedSigs(flag);
-    }
+    /// Call VerilatedContext::assertOn using current thread's VerilatedContext
+    static void assertOn(bool flag) VL_MT_SAFE { Verilated::threadContextp()->assertOn(flag); }
     /// Return VerilatedContext::calcUnusedSigs using current thread's VerilatedContext
     static bool calcUnusedSigs() VL_MT_SAFE {
         return Verilated::threadContextp()->calcUnusedSigs();
+    }
+    /// Call VerilatedContext::calcUnusedSigs using current thread's VerilatedContext
+    static void calcUnusedSigs(bool flag) VL_MT_SAFE {
+        Verilated::threadContextp()->calcUnusedSigs(flag);
     }
     /// Call VerilatedContext::commandArgs using current thread's VerilatedContext
     static void commandArgs(int argc, const char** argv) VL_MT_SAFE {
@@ -789,44 +865,44 @@ public:
     static const char* commandArgsPlusMatch(const char* prefixp) VL_MT_SAFE {
         return Verilated::threadContextp()->commandArgsPlusMatch(prefixp);
     }
-    /// Call VerilatedContext::errorLimit using current thread's VerilatedContext
-    static void errorLimit(int val) VL_MT_SAFE { Verilated::threadContextp()->errorLimit(val); }
     /// Return VerilatedContext::errorLimit using current thread's VerilatedContext
     static int errorLimit() VL_MT_SAFE { return Verilated::threadContextp()->errorLimit(); }
+    /// Call VerilatedContext::errorLimit using current thread's VerilatedContext
+    static void errorLimit(int val) VL_MT_SAFE { Verilated::threadContextp()->errorLimit(val); }
+    /// Return VerilatedContext::fatalOnError using current thread's VerilatedContext
+    static bool fatalOnError() VL_MT_SAFE { return Verilated::threadContextp()->fatalOnError(); }
     /// Call VerilatedContext::fatalOnError using current thread's VerilatedContext
     static void fatalOnError(bool flag) VL_MT_SAFE {
         Verilated::threadContextp()->fatalOnError(flag);
-    }
-    /// Return VerilatedContext::fatalOnError using current thread's VerilatedContext
-    static bool fatalOnError() VL_MT_SAFE { return Verilated::threadContextp()->fatalOnError(); }
-    /// Call VerilatedContext::fatalOnVpiError using current thread's VerilatedContext
-    static void fatalOnVpiError(bool flag) VL_MT_SAFE {
-        Verilated::threadContextp()->fatalOnVpiError(flag);
     }
     /// Return VerilatedContext::fatalOnVpiError using current thread's VerilatedContext
     static bool fatalOnVpiError() VL_MT_SAFE {
         return Verilated::threadContextp()->fatalOnVpiError();
     }
-    /// Call VerilatedContext::gotError using current thread's VerilatedContext
-    static void gotError(bool flag) VL_MT_SAFE { Verilated::threadContextp()->gotError(flag); }
+    /// Call VerilatedContext::fatalOnVpiError using current thread's VerilatedContext
+    static void fatalOnVpiError(bool flag) VL_MT_SAFE {
+        Verilated::threadContextp()->fatalOnVpiError(flag);
+    }
     /// Return VerilatedContext::gotError using current thread's VerilatedContext
     static bool gotError() VL_MT_SAFE { return Verilated::threadContextp()->gotError(); }
-    /// Call VerilatedContext::gotFinish using current thread's VerilatedContext
-    static void gotFinish(bool flag) VL_MT_SAFE { Verilated::threadContextp()->gotFinish(flag); }
+    /// Call VerilatedContext::gotError using current thread's VerilatedContext
+    static void gotError(bool flag) VL_MT_SAFE { Verilated::threadContextp()->gotError(flag); }
     /// Return VerilatedContext::gotFinish using current thread's VerilatedContext
     static bool gotFinish() VL_MT_SAFE { return Verilated::threadContextp()->gotFinish(); }
-    /// Call VerilatedContext::randReset using current thread's VerilatedContext
-    static void randReset(int val) VL_MT_SAFE { Verilated::threadContextp()->randReset(val); }
+    /// Call VerilatedContext::gotFinish using current thread's VerilatedContext
+    static void gotFinish(bool flag) VL_MT_SAFE { Verilated::threadContextp()->gotFinish(flag); }
     /// Return VerilatedContext::randReset using current thread's VerilatedContext
     static int randReset() VL_MT_SAFE { return Verilated::threadContextp()->randReset(); }
-    /// Call VerilatedContext::randSeed using current thread's VerilatedContext
-    static void randSeed(int val) VL_MT_SAFE { Verilated::threadContextp()->randSeed(val); }
+    /// Call VerilatedContext::randReset using current thread's VerilatedContext
+    static void randReset(int val) VL_MT_SAFE { Verilated::threadContextp()->randReset(val); }
     /// Return VerilatedContext::randSeed using current thread's VerilatedContext
     static int randSeed() VL_MT_SAFE { return Verilated::threadContextp()->randSeed(); }
-    /// Call VerilatedContext::time using current thread's VerilatedContext
-    static void time(uint64_t val) VL_MT_SAFE { Verilated::threadContextp()->time(val); }
+    /// Call VerilatedContext::randSeed using current thread's VerilatedContext
+    static void randSeed(int val) VL_MT_SAFE { Verilated::threadContextp()->randSeed(val); }
     /// Return VerilatedContext::time using current thread's VerilatedContext
     static uint64_t time() VL_MT_SAFE { return Verilated::threadContextp()->time(); }
+    /// Call VerilatedContext::time using current thread's VerilatedContext
+    static void time(uint64_t val) VL_MT_SAFE { Verilated::threadContextp()->time(val); }
     /// Call VerilatedContext::timeInc using current thread's VerilatedContext
     static void timeInc(uint64_t add) VL_MT_UNSAFE { Verilated::threadContextp()->timeInc(add); }
     // Deprecated
@@ -897,6 +973,7 @@ public:
     static void overWidthError(const char* signame) VL_ATTR_NORETURN VL_MT_SAFE;
     static void scTimePrecisionError(int sc_prec, int vl_prec) VL_ATTR_NORETURN VL_MT_SAFE;
     static void scTraceBeforeElaborationError() VL_ATTR_NORETURN VL_MT_SAFE;
+    static void stackCheck(QData needSize) VL_MT_UNSAFE;
 
     // Internal: Get and set DPI context
     static const VerilatedScope* dpiScope() VL_MT_SAFE { return t_s.t_dpiScopep; }
@@ -915,8 +992,8 @@ public:
 
     // Internal: Set the mtaskId, called when an mtask starts
     // Per thread, so no need to be in VerilatedContext
-    static void mtaskId(uint32_t id) VL_MT_SAFE { t_s.t_mtaskId = id; }
     static uint32_t mtaskId() VL_MT_SAFE { return t_s.t_mtaskId; }
+    static void mtaskId(uint32_t id) VL_MT_SAFE { t_s.t_mtaskId = id; }
     static void endOfEvalReqdInc() VL_MT_SAFE { ++t_s.t_endOfEvalReqd; }
     static void endOfEvalReqdDec() VL_MT_SAFE { --t_s.t_endOfEvalReqd; }
 
@@ -970,6 +1047,7 @@ void VerilatedContext::timeprecision(int value) VL_MT_SAFE {
         } else if (sc_res == sc_core::sc_time(1, sc_core::SC_FS)) {
             sc_prec = 15;
         }
+        // SC_AS, SC_ZS, SC_YS not supported as no Verilog equivalent; will error below
 #endif
     }
 #if VM_SC

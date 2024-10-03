@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -92,7 +92,6 @@ void LinkCellsGraph::loopsMessageCb(V3GraphVertex* vertexp) {
 // Link state, as a visitor of each AstNode
 
 class LinkCellsVisitor final : public VNVisitor {
-private:
     // NODE STATE
     //  Entire netlist:
     //   AstNodeModule::user1p()        // V3GraphVertex*    Vertex describing this module
@@ -160,15 +159,14 @@ private:
 
     // VISITs
     void visit(AstNetlist* nodep) override {
-        AstNode::user1ClearTree();
         readModNames();
         iterateChildren(nodep);
         // Find levels in graph
         m_graph.removeRedundantEdgesMax(&V3GraphEdge::followAlwaysTrue);
         if (dumpGraphLevel()) m_graph.dumpDotFilePrefixed("linkcells");
         m_graph.rank();
-        for (V3GraphVertex* itp = m_graph.verticesBeginp(); itp; itp = itp->verticesNextp()) {
-            if (const LinkCellsVertex* const vvertexp = itp->cast<LinkCellsVertex>()) {
+        for (V3GraphVertex& vtx : m_graph.vertices()) {
+            if (const LinkCellsVertex* const vvertexp = vtx.cast<LinkCellsVertex>()) {
                 // +1 so we leave level 1  for the new wrapper we'll make in a moment
                 AstNodeModule* const modp = vvertexp->modp();
                 modp->level(vvertexp->rank() + 1);
@@ -241,13 +239,38 @@ private:
                 nodep->v3error("Non-interface used as an interface: " << nodep->prettyNameQ());
             }
         }
+        iterateChildren(nodep);
+        for (AstPin* pinp = nodep->paramsp(); pinp; pinp = VN_AS(pinp->nextp(), Pin)) {
+            pinp->param(true);
+            if (pinp->name() == "") pinp->name("__paramNumber" + cvtToStr(pinp->pinNum()));
+        }
         // Note cannot do modport resolution here; modports are allowed underneath generates
     }
 
+    void visit(AstPackageExport* nodep) override {
+        // Package Import: We need to do the package before the use of a package
+        iterateChildren(nodep);
+        if (!nodep->packagep()) {
+            AstNodeModule* const modp = resolveModule(nodep, nodep->pkgName());
+            if (AstPackage* const pkgp = VN_CAST(modp, Package)) nodep->packagep(pkgp);
+            if (!nodep->packagep()) {
+                nodep->v3error("Export package not found: " << nodep->prettyPkgNameQ());
+                return;
+            }
+        }
+    }
     void visit(AstPackageImport* nodep) override {
         // Package Import: We need to do the package before the use of a package
         iterateChildren(nodep);
-        UASSERT_OBJ(nodep->packagep(), nodep, "Unlinked package");  // Parser should set packagep
+        if (!nodep->packagep()) {
+            AstNodeModule* const modp = resolveModule(nodep, nodep->pkgName());
+            if (AstPackage* const pkgp = VN_CAST(modp, Package)) nodep->packagep(pkgp);
+            // If not found, V3LinkDot will report errors
+            if (!nodep->packagep()) {
+                nodep->v3error("Import package not found: " << nodep->prettyPkgNameQ());
+                return;
+            }
+        }
         new V3GraphEdge{&m_graph, vertex(m_modp), vertex(nodep->packagep()), 1, false};
     }
 
@@ -270,7 +293,7 @@ private:
                 iterateAndNextNull(cellsp);
             }
         }
-        pushDeletep(nodep->unlinkFrBack());
+        VL_DO_DANGLING(pushDeletep(nodep->unlinkFrBack()), nodep);
     }
 
     void visit(AstCell* nodep) override {
@@ -355,7 +378,7 @@ private:
             nextp = VN_AS(pinp->nextp(), Pin);
             if (pinp->svDotName()) pinDotName = true;
             if (pinp->dotStar()) {
-                if (pinStar) pinp->v3error("Duplicate .* in an instance (IEEE 1800-2017 23.3.2)");
+                if (pinStar) pinp->v3error("Duplicate .* in an instance (IEEE 1800-2023 23.3.2)");
                 pinStar = true;
                 // Done with this fake pin
                 VL_DO_DANGLING(pinp->unlinkFrBack()->deleteTree(), pinp);
@@ -376,7 +399,7 @@ private:
             for (AstPin* pinp = nodep->pinsp(); pinp; pinp = VN_AS(pinp->nextp(), Pin)) {
                 if ((pinStar || pinDotName) && pinp->name().substr(0, 11) == "__pinNumber") {
                     pinp->v3error("Mixing positional and .*/named instantiation connection"
-                                  " (IEEE 1800-2017 23.3.2)");
+                                  " (IEEE 1800-2023 23.3.2)");
                 }
                 if (!pinp->exprp()) {
                     if (pinp->name().substr(0, 11) == "__pinNumber") {
@@ -395,6 +418,7 @@ private:
             for (AstNode* portnodep = nodep->modp()->stmtsp(); portnodep;
                  portnodep = portnodep->nextp()) {
                 if (const AstPort* const portp = VN_CAST(portnodep, Port)) {
+
                     if (ports.find(portp->name()) == ports.end()
                         && ports.find("__pinNumber" + cvtToStr(portp->pinNum())) == ports.end()) {
                         if (pinStar) {
@@ -408,11 +432,49 @@ private:
                             newp->svImplicit(true);
                             nodep->addPinsp(newp);
                         } else {  // warn on the CELL that needs it, not the port
-                            nodep->v3warn(PINMISSING,
-                                          "Cell has missing pin: " << portp->prettyNameQ());
-                            AstPin* const newp
-                                = new AstPin{nodep->fileline(), 0, portp->name(), nullptr};
-                            nodep->addPinsp(newp);
+
+                            // We *might* not want to warn on this port, if it happened to be
+                            // an input with a default value in the module declaration. Our
+                            // AstPort* (portp) doesn't have that information, but the Module
+                            // (nodep->modp()) statements do that have information in an AstVar*
+                            // with the same name() as the port. We'll look for that in-line here,
+                            // if a port is missing on this instance.
+
+                            // Get the AstVar for this AstPort, if it exists, using this
+                            // inefficient O(n) lookup to match the port name.
+                            const AstVar* portp_varp = nullptr;
+                            for (AstNode* module_stmtsp = nodep->modp()->stmtsp(); module_stmtsp;
+                                 module_stmtsp = module_stmtsp->nextp()) {
+                                if (const AstVar* const varp = VN_CAST(module_stmtsp, Var)) {
+                                    if (!varp->isParam() && varp->name() == portp->name()) {
+                                        // not a parameter, same name, break, this is our varp
+                                        // (AstVar*)
+                                        portp_varp = varp;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Is the matching Module port: an INPUT, with default value (in
+                            // valuep):
+                            if (portp_varp && portp_varp->isInput() && portp_varp->valuep()) {
+                                // Do not warn
+                                // Create b/c not already connected, and it does exist.
+                                AstPin* const newp
+                                    = new AstPin{nodep->fileline(), 0, portp->name(), nullptr};
+                                nodep->addPinsp(newp);
+                            } else {
+                                nodep->v3warn(PINMISSING,
+                                              "Cell has missing pin: "
+                                                  << portp->prettyNameQ() << '\n'
+                                                  << nodep->warnContextPrimary() << '\n'
+                                                  << portp->warnOther()
+                                                  << "... Location of port declaration\n"
+                                                  << portp->warnContextSecondary());
+                                AstPin* const newp
+                                    = new AstPin{nodep->fileline(), 0, portp->name(), nullptr};
+                                nodep->addPinsp(newp);
+                            }
                         }
                     }
                 }
@@ -448,12 +510,13 @@ private:
                 nodep->addNextHere(varp);
                 nodep->hasIfaceVar(true);
             }
-            if (nodep->hasNoParens()) {
-                nodep->v3error("Interface instantiation "
-                               << nodep->prettyNameQ() << " requires parenthesis\n"
-                               << nodep->warnMore() << "... Suggest use '" << nodep->prettyName()
-                               << "()'");
-            }
+        }
+        if (nodep->hasNoParens()) {
+            // Need in the grammar, otherwise it looks like "id/*data_type*/ id/*new_var*/;"
+            nodep->v3error("Instantiation " << nodep->prettyNameQ()
+                                            << " requires parenthesis (IEEE 1800-2023 23.3.2)\n"
+                                            << nodep->warnMore() << "... Suggest use '"
+                                            << nodep->prettyName() << "()'");
         }
         if (nodep->modp()) {  //
             iterateChildren(nodep);

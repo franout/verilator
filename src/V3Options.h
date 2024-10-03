@@ -6,7 +6,7 @@
 //
 //*************************************************************************
 //
-// Copyright 2003-2023 by Wilson Snyder. This program is free software; you
+// Copyright 2003-2024 by Wilson Snyder. This program is free software; you
 // can redistribute it and/or modify it under the terms of either the GNU
 // Lesser General Public License Version 3 or the Perl Artistic License
 // Version 2.0.
@@ -22,7 +22,6 @@
 
 #include "V3Error.h"
 #include "V3LangCode.h"
-#include "V3ThreadSafety.h"
 
 #include <map>
 #include <set>
@@ -143,7 +142,7 @@ public:
     constexpr operator en() const { return m_e; }
     bool fst() const { return m_e == FST; }
     bool vcd() const { return m_e == VCD; }
-    string classBase() const {
+    string classBase() const VL_MT_SAFE {
         static const char* const names[] = {"VerilatedVcd", "VerilatedFst"};
         return names[m_e];
     }
@@ -203,6 +202,7 @@ private:
     V3StringList m_cFlags;      // argument: user CFLAGS
     V3StringList m_ldLibs;      // argument: user LDFLAGS
     V3StringList m_makeFlags;   // argument: user MAKEFLAGS
+    V3StringSet m_compilerIncludes; // argument: user --compiler-include
     V3StringSet m_futures;      // argument: -Wfuture- list
     V3StringSet m_future0s;     // argument: -future list
     V3StringSet m_future1s;     // argument: -future1 list
@@ -210,6 +210,7 @@ private:
     V3StringSet m_clockers;     // argument: Verilog -clk signals
     V3StringSet m_noClockers;   // argument: Verilog -noclk signals
     V3StringList m_vFiles;      // argument: Verilog files to read
+    V3StringSet m_vltFiles;     // argument: Verilator config files to read
     V3StringList m_forceIncs;   // argument: -FI
     DebugLevelMap m_debugLevel; // argument: --debugi-<srcfile/tag> <level>
     DebugLevelMap m_dumpLevel;  // argument: --dumpi-<srcfile/tag> <level>
@@ -221,6 +222,7 @@ private:
     bool m_makePhony = false;       // main switch: -MP
     bool m_preprocNoLine = false;   // main switch: -P
     bool m_assert = false;          // main switch: --assert
+    bool m_assertCase = false;      // main switch: --assert-case
     bool m_autoflush = false;       // main switch: --autoflush
     bool m_bboxSys = false;         // main switch: --bbox-sys
     bool m_bboxUnsup = false;       // main switch: --bbox-unsup
@@ -243,8 +245,12 @@ private:
     bool m_debugPartition = false;  // main switch: --debug-partition
     bool m_debugProtect = false;    // main switch: --debug-protect
     bool m_debugSelfTest = false;   // main switch: --debug-self-test
+    bool m_debugStackCheck = false;  // main switch: --debug-stack-check
+    bool m_debugWidth = false;      // main switch: --debug-width
     bool m_decoration = true;       // main switch: --decoration
+    bool m_decorationNodes = false;  // main switch: --decoration=nodes
     bool m_dpiHdrOnly = false;      // main switch: --dpi-hdr-only
+    bool m_emitAccessors = false;   // main switch: --emit-accessors
     bool m_exe = false;             // main switch: --exe
     bool m_flatten = false;         // main switch: --flatten
     bool m_hierarchical = false;    // main switch: --hierarchical
@@ -254,7 +260,9 @@ private:
     bool m_main = false;            // main switch: --main
     bool m_outFormatOk = false;     // main switch: --cc, --sc or --sp was specified
     bool m_pedantic = false;        // main switch: --Wpedantic
+    bool m_pinsInoutEnables = false;// main switch: --pins-inout-enables
     bool m_pinsScUint = false;      // main switch: --pins-sc-uint
+    bool m_pinsScUintBool = false;  // main switch: --pins-sc-uint-bool
     bool m_pinsScBigUint = false;   // main switch: --pins-sc-biguint
     bool m_pinsUint8 = false;       // main switch: --pins-uint8
     bool m_ppComments = false;      // main switch: --pp-comments
@@ -267,8 +275,9 @@ private:
     bool m_publicFlatRW = false;    // main switch: --public-flat-rw
     bool m_public_params = false;   // main switch: --public-params
     bool m_quietExit = false;       // main switch: --quiet-exit
-    bool m_relativeIncludes = false; // main switch: --relative-includes
-    bool m_reportUnoptflat = false; // main switch: --report-unoptflat
+    bool m_quietStats = false;      // main switch: --quiet-stats
+    bool m_relativeIncludes = false;  // main switch: --relative-includes
+    bool m_reportUnoptflat = false;  // main switch: --report-unoptflat
     bool m_savable = false;         // main switch: --savable
     bool m_std = true;              // main switch: --std
     bool m_structsPacked = false;   // main switch: --structs-packed
@@ -290,6 +299,7 @@ private:
     bool m_vpi = false;             // main switch: --vpi
     bool m_xInitialEdge = false;    // main switch: --x-initial-edge
     bool m_xmlOnly = false;         // main switch: --xml-only
+    bool m_jsonOnly = false;        // main switch: --json-only
 
     int         m_buildJobs = -1;    // main switch: --build-jobs, -j
     int         m_convergeLimit = 100;  // main switch: --converge-limit
@@ -300,9 +310,13 @@ private:
     int         m_ifDepth = 0;      // main switch: --if-depth
     int         m_inlineMult = 2000;   // main switch: --inline-mult
     int         m_instrCountDpi = 200;   // main switch: --instr-count-dpi
+    bool        m_jsonEditNums = true; // main switch: --no-json-edit-nums
+    bool        m_jsonIds = true; // main switch: --no-json-ids
+    int         m_localizeMaxSize = 1024;  // main switch: --localize-max-size
     VOptionBool m_makeDepend;  // main switch: -MMD
     int         m_maxNumWidth = 65536;  // main switch: --max-num-width
     int         m_moduleRecursion = 100;  // main switch: --module-recursion-depth
+    int         m_outputGroups = 0;  // main switch: --output-groups
     int         m_outputSplit = 20000;  // main switch: --output-split
     int         m_outputSplitCFuncs = -1;  // main switch: --output-split-cfuncs
     int         m_outputSplitCTrace = -1;  // main switch: --output-split-ctrace
@@ -310,6 +324,7 @@ private:
     int         m_publicDepth = 0;   // main switch: --public-depth
     int         m_reloopLimit = 40; // main switch: --reloop-limit
     VOptionBool m_skipIdentical;  // main switch: --skip-identical
+    bool        m_stopFail = true;  // main switch: --stop-fail
     int         m_threads = 1;      // main switch: --threads
     int         m_threadsMaxMTasks = 0;  // main switch: --threads-max-mtasks
     VTimescale  m_timeDefaultPrec;  // main switch: --timescale
@@ -332,6 +347,7 @@ private:
     string      m_buildDepBin;  // main switch: --build-dep-bin {filename}
     string      m_exeName;      // main switch: -o {name}
     string      m_flags;        // main switch: -f {name}
+    string      m_hierParamsFile; // main switch: --hierarchical-params-file
     string      m_l2Name;       // main switch: --l2name; "" for top-module's name
     string      m_libCreate;    // main switch: --lib-create {lib_name}
     string      m_mainTopName;  // main switch: --main-top-name
@@ -346,6 +362,8 @@ private:
     string      m_xAssign;      // main switch: --x-assign
     string      m_xInitial;     // main switch: --x-initial
     string      m_xmlOutput;    // main switch: --xml-output
+    string      m_jsonOnlyOutput;    // main switch: --json-only-output
+    string      m_jsonOnlyMetaOutput;    // main switch: --json-only-meta-output
 
     // Language is now held in FileLine, on a per-node basis. However we still
     // have a concept of the default language at a global level.
@@ -363,6 +381,8 @@ private:
     bool m_fDfgPeephole = true; // main switch: -fno-dfg-peephole
     bool m_fDfgPreInline;    // main switch: -fno-dfg-pre-inline and -fno-dfg
     bool m_fDfgPostInline;   // main switch: -fno-dfg-post-inline and -fno-dfg
+    bool m_fDeadAssigns;     // main switch: -fno-dead-assigns: remove dead assigns
+    bool m_fDeadCells;   // main switch: -fno-dead-cells: remove dead cells
     bool m_fExpand;      // main switch: -fno-expand: expansion of C macros
     bool m_fGate;        // main switch: -fno-gate: gate wire elimination
     bool m_fInline;      // main switch: -fno-inline: module inlining
@@ -385,6 +405,7 @@ private:
 
 private:
     // METHODS
+    void addLineArg(const string& arg);
     void addArg(const string& arg);
     void addDefine(const string& defline, bool allowPlus) VL_MT_DISABLED;
     void addFuture(const string& flag);
@@ -413,20 +434,23 @@ public:
     unsigned debugLevel(const string& tag) const VL_MT_SAFE;
     unsigned debugSrcLevel(const string& srcfile_path) const VL_MT_SAFE;
     unsigned dumpLevel(const string& tag) const VL_MT_SAFE;
-    unsigned dumpSrcLevel(const string& srcfile_path) const;
+    unsigned dumpSrcLevel(const string& srcfile_path) const VL_MT_SAFE;
 
     // METHODS
     void addCppFile(const string& filename);
     void addCFlags(const string& filename);
+    void addCompilerIncludes(const string& filename);
     void addLdLibs(const string& filename);
     void addMakeFlags(const string& filename);
     void addLibraryFile(const string& filename);
     void addClocker(const string& signame);
     void addNoClocker(const string& signame);
     void addVFile(const string& filename);
+    void addVltFile(const string& filename);
     void addForceInc(const string& filename);
     bool available() const VL_MT_SAFE { return m_available; }
     void ccSet();
+    void decorations(FileLine* fl, const string& filename);
     void notify() VL_MT_DISABLED;
 
     // ACCESSORS (options)
@@ -442,6 +466,7 @@ public:
     bool std() const { return m_std; }
     bool structsPacked() const { return m_structsPacked; }
     bool assertOn() const { return m_assert; }  // assertOn as __FILE__ may be defined
+    bool assertCaseOn() const { return m_assertCase || m_assert; }
     bool autoflush() const { return m_autoflush; }
     bool bboxSys() const { return m_bboxSys; }
     bool bboxUnsup() const { return m_bboxUnsup; }
@@ -469,12 +494,16 @@ public:
     bool debugPartition() const { return m_debugPartition; }
     bool debugProtect() const VL_MT_SAFE { return m_debugProtect; }
     bool debugSelfTest() const { return m_debugSelfTest; }
+    bool debugStackCheck() const { return m_debugStackCheck; }
+    bool debugWidth() const VL_PURE { return m_debugWidth; }
     bool decoration() const VL_MT_SAFE { return m_decoration; }
+    bool decorationNodes() const VL_MT_SAFE { return m_decorationNodes; }
     bool dpiHdrOnly() const { return m_dpiHdrOnly; }
     bool dumpDefines() const { return m_dumpLevel.count("defines") && m_dumpLevel.at("defines"); }
     bool dumpTreeDot() const {
         return m_dumpLevel.count("tree-dot") && m_dumpLevel.at("tree-dot");
     }
+    bool emitAccessors() const { return m_emitAccessors; }
     bool exe() const { return m_exe; }
     bool flatten() const { return m_flatten; }
     bool gmake() const { return m_gmake; }
@@ -491,8 +520,10 @@ public:
     bool outFormatOk() const { return m_outFormatOk; }
     bool keepTempFiles() const { return (V3Error::debugDefault() != 0); }
     bool pedantic() const { return m_pedantic; }
+    bool pinsInoutEnables() const { return m_pinsInoutEnables; }
     bool pinsScUint() const { return m_pinsScUint; }
-    bool pinsScBigUint() const { return m_pinsScBigUint; }
+    bool pinsScUintBool() const { return m_pinsScUintBool; }
+    bool pinsScBigUint() const VL_MT_SAFE { return m_pinsScBigUint; }
     bool pinsUint8() const { return m_pinsUint8; }
     bool ppComments() const { return m_ppComments; }
     bool profC() const { return m_profC; }
@@ -507,11 +538,14 @@ public:
     bool lintOnly() const VL_MT_SAFE { return m_lintOnly; }
     bool ignc() const { return m_ignc; }
     bool quietExit() const VL_MT_SAFE { return m_quietExit; }
+    bool quietStats() const VL_MT_SAFE { return m_quietStats; }
     bool reportUnoptflat() const { return m_reportUnoptflat; }
     bool verilate() const { return m_verilate; }
     bool vpi() const { return m_vpi; }
     bool xInitialEdge() const { return m_xInitialEdge; }
     bool xmlOnly() const { return m_xmlOnly; }
+    bool jsonOnly() const { return m_jsonOnly; }
+    bool serializeOnly() const { return m_xmlOnly || m_jsonOnly; }
     bool topIfacesSupported() const { return lintOnly() && !hierarchical(); }
 
     int buildJobs() const VL_MT_SAFE { return m_buildJobs; }
@@ -523,19 +557,24 @@ public:
     int ifDepth() const { return m_ifDepth; }
     int inlineMult() const { return m_inlineMult; }
     int instrCountDpi() const { return m_instrCountDpi; }
+    int localizeMaxSize() const { return m_localizeMaxSize; }
+    bool jsonEditNums() const { return m_jsonEditNums; }
+    bool jsonIds() const { return m_jsonIds; }
     VOptionBool makeDepend() const { return m_makeDepend; }
     int maxNumWidth() const { return m_maxNumWidth; }
     int moduleRecursionDepth() const { return m_moduleRecursion; }
     int outputSplit() const { return m_outputSplit; }
     int outputSplitCFuncs() const { return m_outputSplitCFuncs; }
     int outputSplitCTrace() const { return m_outputSplitCTrace; }
-    int pinsBv() const { return m_pinsBv; }
+    int outputGroups() const { return m_outputGroups; }
+    int pinsBv() const VL_MT_SAFE { return m_pinsBv; }
     int publicDepth() const { return m_publicDepth; }
     int reloopLimit() const { return m_reloopLimit; }
     VOptionBool skipIdentical() const { return m_skipIdentical; }
+    bool stopFail() const { return m_stopFail; }
     int threads() const VL_MT_SAFE { return m_threads; }
     int threadsMaxMTasks() const { return m_threadsMaxMTasks; }
-    bool mtasks() const { return (m_threads > 1); }
+    bool mtasks() const VL_MT_SAFE { return (m_threads > 1); }
     VTimescale timeDefaultPrec() const { return m_timeDefaultPrec; }
     VTimescale timeDefaultUnit() const { return m_timeDefaultUnit; }
     VTimescale timeOverridePrec() const { return m_timeOverridePrec; }
@@ -556,14 +595,16 @@ public:
         return useTraceParallel() ? threads() : useTraceOffload() ? 1 : 0;
     }
     int unrollCount() const { return m_unrollCount; }
+    int unrollCountAdjusted(const VOptionBool& full, bool generate, bool simulate);
     int unrollStmts() const { return m_unrollStmts; }
     int verilateJobs() const { return m_verilateJobs; }
 
     int compLimitBlocks() const { return m_compLimitBlocks; }
-    int compLimitMembers() const { return m_compLimitMembers; }
+    int compLimitMembers() const VL_MT_SAFE { return m_compLimitMembers; }
     int compLimitParens() const { return m_compLimitParens; }
 
     string exeName() const { return m_exeName != "" ? m_exeName : prefix(); }
+    string hierParamFile() const { return m_hierParamsFile; }
     string l2Name() const { return m_l2Name; }
     string libCreate() const { return m_libCreate; }
     string libCreateName(bool shared) {
@@ -591,13 +632,17 @@ public:
     string xAssign() const { return m_xAssign; }
     string xInitial() const { return m_xInitial; }
     string xmlOutput() const { return m_xmlOutput; }
+    string jsonOnlyOutput() const { return m_jsonOnlyOutput; }
+    string jsonOnlyMetaOutput() const { return m_jsonOnlyMetaOutput; }
 
     const V3StringSet& cppFiles() const { return m_cppFiles; }
     const V3StringList& cFlags() const { return m_cFlags; }
+    const V3StringSet& compilerIncludes() const { return m_compilerIncludes; }
     const V3StringList& ldLibs() const { return m_ldLibs; }
     const V3StringList& makeFlags() const { return m_makeFlags; }
     const V3StringSet& libraryFiles() const { return m_libraryFiles; }
     const V3StringList& vFiles() const { return m_vFiles; }
+    const V3StringSet& vltFiles() const { return m_vltFiles; }
     const V3StringList& forceIncs() const { return m_forceIncs; }
 
     bool hasParameter(const string& name);
@@ -626,6 +671,8 @@ public:
     bool fDfgPeepholeEnabled(const std::string& name) const {
         return !m_fDfgPeepholeDisabled.count(name);
     }
+    bool fDeadAssigns() const { return m_fDeadAssigns; }
+    bool fDeadCells() const { return m_fDeadCells; }
     bool fExpand() const { return m_fExpand; }
     bool fGate() const { return m_fGate; }
     bool fInline() const { return m_fInline; }
@@ -643,7 +690,7 @@ public:
     bool fTable() const { return m_fTable; }
     bool fTaskifyAll() const { return m_fTaskifyAll; }
 
-    string traceClassBase() const { return m_traceFormat.classBase(); }
+    string traceClassBase() const VL_MT_SAFE { return m_traceFormat.classBase(); }
     string traceClassLang() const { return m_traceFormat.classBase() + (systemC() ? "Sc" : "C"); }
     string traceSourceBase() const { return m_traceFormat.sourceName(); }
     string traceSourceLang() const VL_MT_SAFE {
@@ -651,7 +698,7 @@ public:
     }
 
     bool hierarchical() const { return m_hierarchical; }
-    int hierChild() const { return m_hierChild; }
+    int hierChild() const VL_MT_SAFE { return m_hierChild; }
     bool hierTop() const VL_MT_SAFE { return !m_hierChild && !m_hierBlocks.empty(); }
     const V3HierBlockOptSet& hierBlocks() const { return m_hierBlocks; }
     // Directory to save .tree, .dot, .dat, .vpp for hierarchical block top
@@ -666,7 +713,7 @@ public:
     string allArgsString() const VL_MT_SAFE;  ///< Return all passed arguments as simple string
     // Return options for child hierarchical blocks when forTop==false, otherwise returns args for
     // the top module.
-    string allArgsStringForHierBlock(bool forTop) const;
+    string allArgsStringForHierBlock(bool forTop, bool forCMake) const;
     void parseOpts(FileLine* fl, int argc, char** argv) VL_MT_DISABLED;
     void parseOptsList(FileLine* fl, const string& optdir, int argc, char** argv) VL_MT_DISABLED;
     void parseOptsFile(FileLine* fl, const string& filename, bool rel) VL_MT_DISABLED;
@@ -679,11 +726,13 @@ public:
     static string getenvMAKE();
     static string getenvMAKEFLAGS();
     static string getenvPERL();
+    static string getenvPYTHON3();
     static string getenvSYSTEMC();
     static string getenvSYSTEMC_ARCH();
     static string getenvSYSTEMC_INCLUDE();
     static string getenvSYSTEMC_LIBDIR();
     static string getenvVERILATOR_ROOT();
+    static string getenvVERILATOR_SOLVER();
     static string getStdPackagePath();
     static string getSupported(const string& var);
     static bool systemCSystemWide();
@@ -697,7 +746,6 @@ public:
     void filePathLookedMsg(FileLine* fl, const string& modname);
     V3LangCode fileLanguage(const string& filename);
     static bool fileStatNormal(const string& filename);
-    static void fileNfsFlush(const string& filename);
 
     // METHODS (other OS)
     static void throwSigsegv();
