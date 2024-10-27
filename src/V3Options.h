@@ -133,7 +133,7 @@ inline std::ostream& operator<<(std::ostream& os, const VTimescale& rhs) {
 
 class TraceFormat final {
 public:
-    enum en : uint8_t { VCD = 0, FST } m_e;
+    enum en : uint8_t { VCD = 0, EVCD, FST } m_e;
     // cppcheck-suppress noExplicitConstructor
     constexpr TraceFormat(en _e = VCD)
         : m_e{_e} {}
@@ -141,13 +141,13 @@ public:
         : m_e(static_cast<en>(_e)) {}  // Need () or GCC 4.8 false warning
     constexpr operator en() const { return m_e; }
     bool fst() const { return m_e == FST; }
-    bool vcd() const { return m_e == VCD; }
+    bool vcd() const { return m_e == VCD || m_e == EVCD; }
     string classBase() const VL_MT_SAFE {
-        static const char* const names[] = {"VerilatedVcd", "VerilatedFst"};
+        static const char* const names[] = {"VerilatedVcd", "VerilatedVcd", "VerilatedFst"};
         return names[m_e];
     }
     string sourceName() const VL_MT_SAFE {
-        static const char* const names[] = {"verilated_vcd", "verilated_fst"};
+        static const char* const names[] = {"verilated_vcd", "verilated_vcd", "verilated_fst"};
         return names[m_e];
     }
 };
@@ -289,6 +289,7 @@ private:
     bool m_threadsDpiUnpure = false;  // main switch: --threads-dpi all
     VOptionBool m_timing;           // main switch: --timing
     bool m_trace = false;           // main switch: --trace
+    bool m_trace_evcd = false;      // main switch: --trace-evcd
     bool m_traceCoverage = false;   // main switch: --trace-coverage
     bool m_traceParams = true;      // main switch: --trace-params
     bool m_traceStructs = false;    // main switch: --trace-structs
@@ -512,6 +513,7 @@ public:
     bool threadsCoarsen() const { return m_threadsCoarsen; }
     VOptionBool timing() const { return m_timing; }
     bool trace() const { return m_trace; }
+    bool trace_evcd() const { return m_trace_evcd; }
     bool traceCoverage() const { return m_traceCoverage; }
     bool traceParams() const { return m_traceParams; }
     bool traceStructs() const { return m_traceStructs; }
