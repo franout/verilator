@@ -52,6 +52,7 @@ private:
     uint64_t m_rolloverSize = 0;  // File size to rollover at
     int m_indent = 0;  // Indentation depth
 
+    bool m_extended = false;  // Dump the VCD with the extendend format (eVCD)
     char* m_wrBufp;  // Output buffer
     char* m_wrFlushp;  // Output buffer flush trigger location
     char* m_writep;  // Write pointer into output buffer
@@ -111,6 +112,7 @@ public:
 
     // CONSTRUCTOR
     explicit VerilatedVcd(VerilatedVcdFile* filep = nullptr);
+    explicit VerilatedVcd(bool extended = false);
     ~VerilatedVcd();
 
     // ACCESSORS
@@ -261,11 +263,13 @@ public:
     /// Construct the dump. Optional argument is a preconstructed file.
     explicit VerilatedVcdC(VerilatedVcdFile* filep = nullptr)
         : m_sptrace{filep} {}
+    /// Construct the extended dump.
+    explicit VerilatedVcdC(bool extended = false)
+        : m_sptrace{extended} {}
     /// Destruct, flush, and close the dump
     virtual ~VerilatedVcdC() { close(); }
 
     // METHODS - User called
-
     /// Return if file is open
     bool isOpen() const override VL_MT_SAFE { return m_sptrace.isOpen(); }
     /// Open a new VCD file
